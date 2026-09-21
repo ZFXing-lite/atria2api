@@ -46,7 +46,7 @@ func (s *Server) management(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case p == "/endpoints":
 		writeJSON(w, http.StatusOK, map[string]any{"endpoints": []string{
-			"/config", "/keys", "/api-keys", "/usage", "/stats", "/proxies", "/panel",
+			"/config", "/keys", "/keys/bulk", "/api-keys", "/usage", "/stats", "/proxies", "/panel",
 		}})
 	case p == "/config":
 		b, err := cfg.SnapshotJSON()
@@ -62,6 +62,8 @@ func (s *Server) management(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"keys": s.pool.Status()})
 	case p == "/keys" && r.Method == http.MethodPost:
 		s.addUpstreamKey(w, r)
+	case p == "/keys/bulk" && r.Method == http.MethodPost:
+		s.bulkAddUpstreamKeys(w, r)
 	case strings.HasPrefix(p, "/keys/") && r.Method == http.MethodDelete:
 		id := idFromPath(p)
 		if !s.pool.RemoveKey(id) || !s.mutateConfig(func(c *config.Config) bool { return c.RemoveUpstreamKey(id) }) {
@@ -152,6 +154,60 @@ func (s *Server) addUpstreamKey(w http.ResponseWriter, r *http.Request) {
 	}
 	slog.Info("upstream key added", "id", id, "weight", req.Weight)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "id": id})
+}
+
+// bulkAddUpstreamKeys imports many keys at once. Each line is one key; blank
+// lines and #-comments are ignored and duplicates are collapsed.
+func (s *Server) bulkAddUpstreamKeys(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Keys   []string `json:"keys"`
+		Weight int      `json:"weight"`
+		Proxy  string   `json:"proxy"`
+	}
+	if err := decodeBody(r, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, errBody(err.Error(), "bad_request"))
+		return
+	}
+	if weight := req.Weight; weight <= 0 {
+		req.Weight = 1
+	}
+	proxy := strings.TrimSpace(req.Proxy)
+
+	seen := map[string]bool{}
+	added, updated, skipped := 0, 0, 0
+	var ids []string
+	for _, raw := range req.Keys {
+		k := strings.TrimSpace(raw)
+		if k == "" || strings.HasPrefix(k, "#") {
+			skipped++
+			continue
+		}
+		if seen[k] {
+			skipped++
+			continue
+		}
+		seen[k] = true
+		existed := s.pool.Has(k)
+		id := s.pool.AddKey(k, req.Weight, proxy)
+		if id == "" {
+			skipped++
+			continue
+		}
+		if existed {
+			updated++
+		} else {
+			added++
+			ids = append(ids, id)
+		}
+		s.mutateConfig(func(c *config.Config) bool {
+			c.AddUpstreamKey(k, req.Weight, proxy)
+			return true
+		})
+	}
+	slog.Info("bulk import", "added", added, "updated", updated, "skipped", skipped)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": true, "added": added, "updated": updated, "skipped": skipped, "ids": ids,
+	})
 }
 
 // addAPIKey adds a downstream key clients can use to call this gateway.

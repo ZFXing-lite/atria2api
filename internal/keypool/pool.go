@@ -517,6 +517,14 @@ func (p *Pool) Enable(id string) bool {
 
 // --- runtime key management ----------------------------------------------
 
+// Has reports whether a raw key value is already in the pool.
+func (p *Pool) Has(key string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	_, ok := p.byID[idOf(key)]
+	return ok
+}
+
 // AddKey registers a key at runtime, or updates its weight/proxy when the id
 // already exists. Returns the entry id. Existing cooldowns/counts are kept.
 func (p *Pool) AddKey(key string, weight int, proxy string) string {

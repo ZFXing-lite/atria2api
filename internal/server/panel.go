@@ -112,6 +112,28 @@ const panelHTML = `<!DOCTYPE html>
       <input id="newProxy" placeholder="代理覆盖（可空，如 socks5://host:port 或 none）" style="min-width:260px">
       <button class="btn primary" type="submit">添加上游 Key</button>
     </form>
+    <div style="margin-top:14px">
+      <button class="btn sm" onclick="toggleBulk()" id="bulkBtn">批量导入 ▾</button>
+      <div id="bulkBox" style="display:none;margin-top:10px">
+        <div class="muted" style="font-size:12px;margin-bottom:6px">
+          每行一条 key；空行和以 # 开头的行自动忽略，重复自动去重。
+        </div>
+        <textarea id="bulkText" rows="8" style="width:100%;max-width:640px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:8px;font:12px ui-monospace,monospace"
+          placeholder="atr_xxx&#10;atr_yyy&#10;# 这是一行注释，会被忽略"></textarea>
+        <div class="inline" style="margin-top:8px">
+          <input type="file" id="bulkFile" accept=".txt,text/plain" style="font-size:12px">
+          <button class="btn sm" onclick="loadBulkFile()">读取 .txt 文件</button>
+          <button class="btn sm" onclick="previewBulk()">解析预览</button>
+          <span id="bulkPreview" class="muted" style="font-size:12px"></span>
+        </div>
+        <div class="inline" style="margin-top:8px">
+          <span class="muted" style="font-size:12px">导入权重</span>
+          <input id="bulkWeight" type="number" value="1" min="1" style="width:70px">
+          <input id="bulkProxy" placeholder="代理覆盖（可空）" style="min-width:240px">
+          <button class="btn primary" onclick="importBulk()">批量导入</button>
+        </div>
+      </div>
+    </div>
   </section>
 
   <section>
@@ -306,6 +328,60 @@ function addKey(e) {
     toast('上游 key 已添加并生效'); refresh();
   }).catch(function(err){ toast('添加失败: '+err, true); });
   return false;
+}
+
+function toggleBulk() {
+  var box = document.getElementById('bulkBox');
+  var open = box.style.display === 'none';
+  box.style.display = open ? 'block' : 'none';
+  document.getElementById('bulkBtn').textContent = open ? '批量导入 ▴' : '批量导入 ▾';
+}
+
+// parseBulkText splits pasted or file text into unique, non-comment key lines.
+function parseBulkText(text) {
+  var seen = {}, out = [];
+  (text || '').split(/\r?\n/).forEach(function(line) {
+    var k = line.trim();
+    if (!k || k.charAt(0) === '#') return;
+    if (seen[k]) return;
+    seen[k] = true;
+    out.push(k);
+  });
+  return out;
+}
+
+function loadBulkFile() {
+  var f = document.getElementById('bulkFile').files[0];
+  if (!f) { toast('请先选择 .txt 文件', true); return; }
+  var rd = new FileReader();
+  rd.onload = function() {
+    document.getElementById('bulkText').value = rd.result;
+    previewBulk();
+    toast('已读取 ' + f.name);
+  };
+  rd.onerror = function() { toast('文件读取失败', true); };
+  rd.readAsText(f, 'UTF-8');
+}
+
+function previewBulk() {
+  var keys = parseBulkText(document.getElementById('bulkText').value);
+  document.getElementById('bulkPreview').textContent =
+    '解析出 ' + keys.length + ' 条有效 key' + (keys.length ? '（预览前 3 条：' + keys.slice(0,3).join(', ') + (keys.length>3?'…':'') + '）' : '');
+}
+
+function importBulk() {
+  var keys = parseBulkText(document.getElementById('bulkText').value);
+  if (!keys.length) { toast('没有可导入的 key', true); return; }
+  api('/v0/management/keys/bulk', 'POST', {
+    keys: keys,
+    weight: parseInt(document.getElementById('bulkWeight').value) || 1,
+    proxy: document.getElementById('bulkProxy').value.trim()
+  }).then(function(res){
+    toast('导入完成：新增 ' + res.added + '，更新 ' + res.updated + '，跳过 ' + res.skipped);
+    document.getElementById('bulkText').value = '';
+    document.getElementById('bulkPreview').textContent = '';
+    refresh();
+  }).catch(function(err){ toast('导入失败: ' + err, true); });
 }
 
 function renderAPIKeys(res) {
