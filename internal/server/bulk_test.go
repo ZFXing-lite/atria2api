@@ -23,6 +23,7 @@ func bulkServer(t *testing.T) (*Server, string) {
 	cfg := &config.Config{Host: "127.0.0.1", Port: 8318, APIKeys: []string{"gw"}}
 	cfg.Upstream.BaseURL = "http://up.invalid"
 	cfg.Upstream.DefaultModel = "Atria-Dawn-Preview"
+	cfg.Upstream.Keys = []config.UpstreamKey{{Key: "atr_old"}} // matches the live pool
 	cfg.Management.SecretKey = "mgt"
 	cfg.Management.AllowRemote = true
 	return New(cfg, r, pool, nil, metrics.New(""), cfgPath), cfgPath

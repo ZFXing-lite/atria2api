@@ -37,6 +37,7 @@ func mgmtServer(t *testing.T) (*Server, string) {
 	cfg := &config.Config{Host: "127.0.0.1", Port: 8318, APIKeys: []string{"gw-orig", "gw-other"}}
 	cfg.Upstream.BaseURL = up.URL
 	cfg.Upstream.DefaultModel = "Atria-Dawn-Preview"
+	cfg.Upstream.Keys = []config.UpstreamKey{{Key: "atr_orig"}} // matches the live pool
 	cfg.Management.SecretKey = "mgt"
 	cfg.Management.AllowRemote = true
 	s := New(cfg, r, pool, nil, metrics.New(""), cfgPath)
@@ -54,8 +55,11 @@ func mgmtDo(t *testing.T, s *Server, method, path string, body any) *httptest.Re
 	}
 	req := httptest.NewRequest(method, path, rdr)
 	req.Header.Set("X-Management-Key", "mgt")
+	req.RemoteAddr = "127.0.0.1:12345" // loopback so mgmtDo works
+	loginReset("127.0.0.1")            // keep the login guard from blocking other tests
 	w := httptest.NewRecorder()
 	s.Handler().ServeHTTP(w, req)
+	loginReset("127.0.0.1")
 	return w
 }
 
@@ -203,6 +207,9 @@ func TestBadManagementKey(t *testing.T) {
 	s, _ := mgmtServer(t)
 	req := httptest.NewRequest("POST", "/v0/management/keys", strings.NewReader(`{"key":"x"}`))
 	req.Header.Set("X-Management-Key", "wrong")
+	req.RemoteAddr = "127.0.0.1:12345"
+	loginReset("127.0.0.1")
+	defer loginReset("127.0.0.1") // this test spends one failure on this IP
 	w := httptest.NewRecorder()
 	s.Handler().ServeHTTP(w, req)
 	if w.Code != 401 {
@@ -215,4 +222,98 @@ func firstChars(s string) string {
 		return s[:200]
 	}
 	return s
+}
+
+func TestSnapshotHidesSecrets(t *testing.T) {
+	s, _ := mgmtServer(t)
+	cfg := *s.cfg.Load()
+	cfg.Management.SecretKey = "super-secret-mgt"
+	cfg.Proxy.SOCKS5 = []config.ProxyEntry{
+		{URL: "socks5://user:pass@127.0.0.1:1080"},
+	}
+	s.Update(&cfg)
+
+	req := httptest.NewRequest("GET", "/v0/management/config", nil)
+	req.RemoteAddr = "127.0.0.1:12345"
+	req.Header.Set("X-Management-Key", "super-secret-mgt")
+	loginReset("127.0.0.1")
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("config: %d", w.Code)
+	}
+	body := w.Body.String()
+	for _, secret := range []string{"super-secret-mgt", "user:pass"} {
+		if strings.Contains(body, secret) {
+			t.Fatalf("secret leaked into /config response: %s", firstChars(body))
+		}
+	}
+	if !strings.Contains(body, "socks5://***@127.0.0.1:1080") {
+		t.Fatalf("proxy URL not masked: %s", firstChars(body))
+	}
+	if !strings.Contains(body, `"secret-key-set": true`) {
+		t.Fatalf("secret-key-set flag missing: %s", firstChars(body))
+	}
+}
+
+func TestLoopbackNotSpoofable(t *testing.T) {
+	s, _ := mgmtServer(t)
+	s.cfg.Load().Management.AllowRemote = false
+
+	// A remote peer cannot pass as loopback by setting Host: localhost.
+	req := httptest.NewRequest("GET", "http://10.0.0.9:8318/v0/management/keys", nil)
+	req.Host = "localhost:8318"
+	req.RemoteAddr = "10.0.0.9:54321"
+	req.Header.Set("X-Management-Key", "mgt")
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, req)
+	if w.Code != 403 {
+		t.Fatalf("spoofed Host must be rejected, got %d %s", w.Code, w.Body.String())
+	}
+
+	// A genuine loopback peer is allowed.
+	req2 := httptest.NewRequest("GET", "http://127.0.0.1:8318/v0/management/keys", nil)
+	req2.RemoteAddr = "127.0.0.1:54321"
+	req2.Header.Set("X-Management-Key", "mgt")
+	w2 := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w2, req2)
+	if w2.Code != 200 {
+		t.Fatalf("loopback must be allowed, got %d", w2.Code)
+	}
+}
+
+func TestManagementLoginRateLimited(t *testing.T) {
+	s, _ := mgmtServer(t)
+	ip := "192.0.2.1"
+	loginReset(ip)
+	// Wrong key maxLoginFailures times from one IP; each attempt is a 401...
+	for i := 0; i < maxLoginFailures; i++ {
+		req := httptest.NewRequest("GET", "/v0/management/keys", nil)
+		req.RemoteAddr = ip + ":1111"
+		req.Header.Set("X-Management-Key", "wrong")
+		w := httptest.NewRecorder()
+		s.Handler().ServeHTTP(w, req)
+		if w.Code != 401 {
+			t.Fatalf("attempt %d: want 401, got %d", i, w.Code)
+		}
+	}
+	// ...after which the IP is locked out even with the correct key.
+	req := httptest.NewRequest("GET", "/v0/management/keys", nil)
+	req.RemoteAddr = ip + ":1111"
+	req.Header.Set("X-Management-Key", "mgt")
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, req)
+	if w.Code != 429 {
+		t.Fatalf("locked-out IP must get 429 even with the right key, got %d", w.Code)
+	}
+	// A different IP is unaffected.
+	req2 := httptest.NewRequest("GET", "/v0/management/keys", nil)
+	req2.RemoteAddr = "198.51.100.7:2222"
+	req2.Header.Set("X-Management-Key", "mgt")
+	w2 := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w2, req2)
+	if w2.Code != 200 {
+		t.Fatalf("other IP must still work, got %d", w2.Code)
+	}
+	loginReset(ip) // leave the locked bucket clean for other tests
 }

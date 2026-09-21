@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -20,13 +21,16 @@ import (
 
 // Server is the gateway HTTP front-end.
 type Server struct {
-	cfg        atomic.Pointer[config.Config]
-	relayer    *relay.Relayer
-	pool       *keypool.Pool
-	proxies    *proxypool.Pool
-	metrics    *metrics.Recorder
-	stats      *Stats
-	mgmtOn     atomic.Bool
+	cfg     atomic.Pointer[config.Config]
+	relayer *relay.Relayer
+	pool    *keypool.Pool
+	proxies *proxypool.Pool
+	metrics *metrics.Recorder
+	stats   *Stats
+	mgmtOn  atomic.Bool
+	// mgmtMu serializes read-modify-write of the live config so concurrent
+	// management requests cannot drop each other's updates.
+	mgmtMu     sync.Mutex
 	log        *slog.Logger
 	started    time.Time
 	configPath string
@@ -45,6 +49,17 @@ func New(cfg *config.Config, relayer *relay.Relayer, pool *keypool.Pool,
 func (s *Server) Update(cfg *config.Config) {
 	s.cfg.Store(cfg)
 	s.mgmtOn.Store(strings.TrimSpace(cfg.Management.SecretKey) != "")
+}
+
+// ApplyReload is the hot-reload entry point: it publishes the freshly loaded
+// config and reconciles the key pool to it. Mutations made through the
+// management API go through mutateConfig, which persists before publishing, so
+// a reload can only ever see a config file that matches the live state.
+func (s *Server) ApplyReload(cfg *config.Config, pool *keypool.Pool) {
+	s.mgmtMu.Lock()
+	defer s.mgmtMu.Unlock()
+	s.Update(cfg)
+	pool.SyncKeys(toPoolKeys(cfg))
 }
 
 // Handler returns the root mux. It is rebuilt on config hot-reload by callers
@@ -188,12 +203,16 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 		start := time.Now()
 		s.stats.Begin(r.URL.Path)
 		rw := &statusWriter{ResponseWriter: w, status: 200}
-		errMsg := ""
+		// next recovers panics itself, but if it ever does not the deferred End
+		// keeps the inflight counter from leaking forever.
+		defer func() {
+			errMsg := ""
+			if rw.status >= 400 {
+				errMsg = truncateMsg(rw.bodySnippet())
+			}
+			s.stats.End(r.URL.Path, rw.status, time.Since(start), errMsg)
+		}()
 		next.ServeHTTP(rw, r)
-		if rw.status >= 400 {
-			errMsg = truncateMsg(rw.bodySnippet())
-		}
-		s.stats.End(r.URL.Path, rw.status, time.Since(start), errMsg)
 		s.log.Info("http", "method", r.Method, "path", r.URL.Path,
 			"status", rw.status, "bytes", rw.bytes,
 			"ip", clientIP(r), "took", time.Since(start).Round(time.Millisecond))
@@ -254,6 +273,15 @@ func clientIP(r *http.Request) string {
 		return strings.TrimSpace(strings.Split(ff, ",")[0])
 	}
 	return r.RemoteAddr
+}
+
+// toPoolKeys converts the configured upstream keys to the pool's input.
+func toPoolKeys(cfg *config.Config) []keypool.UpstreamKey {
+	out := make([]keypool.UpstreamKey, 0, len(cfg.Upstream.Keys))
+	for _, k := range cfg.Upstream.Keys {
+		out = append(out, keypool.UpstreamKey{Key: k.Key, Weight: k.Weight, Proxy: k.Proxy})
+	}
+	return out
 }
 
 func errBody(msg, code string) map[string]any {

@@ -3,9 +3,11 @@ package config
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -322,14 +324,7 @@ func (c *Config) IsAuthorized(token string) bool {
 }
 
 func subtleEqual(a, b string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	var diff byte
-	for i := 0; i < len(a); i++ {
-		diff |= a[i] ^ b[i]
-	}
-	return diff == 0
+	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
 // --- env overrides -------------------------------------------------------
@@ -407,10 +402,10 @@ func (c *Config) AddUpstreamKey(key string, weight int, proxy string) string {
 	if weight <= 0 {
 		weight = 1
 	}
-	for _, k := range c.Upstream.Keys {
-		if strings.TrimSpace(k.Key) == key {
-			k.Weight = weight
-			k.Proxy = strings.TrimSpace(proxy)
+	for i := range c.Upstream.Keys {
+		if strings.TrimSpace(c.Upstream.Keys[i].Key) == key {
+			c.Upstream.Keys[i].Weight = weight
+			c.Upstream.Keys[i].Proxy = strings.TrimSpace(proxy)
 			return UpstreamKeyID(key)
 		}
 	}
@@ -569,41 +564,141 @@ func mask(s string) string {
 // MaskKey is the exported masking helper used across packages.
 func MaskKey(s string) string { return mask(s) }
 
-// SnapshotJSON serializes the non-secret parts of the config for the management API.
+// SnapshotJSON serializes the non-secret parts of the config for the management
+// API. The management secret, TLS key path and proxy credentials are masked or
+// dropped: this response would otherwise hand those secrets to anyone holding
+// the management key.
 func (c *Config) SnapshotJSON() ([]byte, error) {
 	type outKey struct {
 		Key    string `json:"key"`
 		Weight int    `json:"weight"`
 		Proxy  string `json:"proxy,omitempty"`
 	}
-	cp := *c
-	cp.APIKeys = nil
 	keys := make([]outKey, 0, len(c.Upstream.Keys))
 	for _, k := range c.Upstream.Keys {
 		keys = append(keys, outKey{Key: mask(k.Key), Weight: k.Weight, Proxy: k.Proxy})
 	}
-	cp.Upstream.Keys = nil
-	b, err := json.MarshalIndent(&struct {
-		Host         string     `json:"host"`
-		Port         int        `json:"port"`
-		TLS          TLS        `json:"tls"`
-		Upstream     Upstream   `json:"upstream"`
-		Proxy        Proxy      `json:"proxy"`
-		RateLimit    RateLimit  `json:"rate-limit"`
-		Log          Log        `json:"log"`
-		Metrics      Metrics    `json:"metrics"`
-		Management   Management `json:"remote-management"`
-		KeysMasked   []outKey   `json:"upstream-keys-masked"`
-		AuthRequired bool       `json:"auth-required"`
-	}{
-		Host: cp.Host, Port: cp.Port, TLS: cp.TLS, Upstream: cp.Upstream,
-		Proxy: cp.Proxy, RateLimit: cp.RateLimit, Log: cp.Log, Metrics: cp.Metrics,
-		Management: cp.Management, KeysMasked: keys, AuthRequired: c.AuthRequired(),
-	}, "", "  ")
-	if err != nil {
-		return nil, err
+	proxies := make([]string, 0, len(c.Proxy.SOCKS5))
+	for _, p := range c.Proxy.SOCKS5 {
+		proxies = append(proxies, maskProxyURL(p.URL))
 	}
-	return b, nil
+	return json.MarshalIndent(&struct {
+		Host         string      `json:"host"`
+		Port         int         `json:"port"`
+		TLS          tlsOut      `json:"tls"`
+		Upstream     upstreamOut `json:"upstream"`
+		Proxy        proxyOut    `json:"proxy"`
+		RateLimit    rateOut     `json:"rate-limit"`
+		Log          logOut      `json:"log"`
+		Metrics      metricsOut  `json:"metrics"`
+		Management   mgmtOut     `json:"remote-management"`
+		KeysMasked   []outKey    `json:"upstream-keys-masked"`
+		APIKeys      []string    `json:"api-keys-masked"`
+		AuthRequired bool        `json:"auth-required"`
+	}{
+		Host: c.Host, Port: c.Port,
+		TLS: tlsOut{Enable: c.TLS.Enable, Cert: c.TLS.Cert, Key: maskPathKey(c.TLS.Key)},
+		Upstream: upstreamOut{
+			BaseURL: c.Upstream.BaseURL, DefaultModel: c.Upstream.DefaultModel,
+			ForceModel: c.Upstream.ForceModel, Timeout: c.Upstream.Timeout.String(),
+			ConnectTimeout: c.Upstream.ConnectTimeout.String(), Keys: len(c.Upstream.Keys),
+		},
+		Proxy: proxyOut{Policy: c.Proxy.Policy, HealthEvery: c.Proxy.HealthEvery.String(),
+			FailCooldown: c.Proxy.FailCooldown.String(), SOCKS5: proxies},
+		RateLimit: rateOut{
+			RespectHeader: c.RateLimit.RespectHeader, MinRPMReserve: c.RateLimit.MinRPMReserve,
+			Cooldown429: c.RateLimit.Cooldown429.String(), Cooldown5xx: c.RateLimit.Cooldown5xx.String(),
+			ErrThreshold: c.RateLimit.ErrThreshold, ErrCooldown: c.RateLimit.ErrCooldown.String(),
+			DisableOn401: c.RateLimit.DisableOn401, MaxRetries: c.RateLimit.MaxRetries,
+			RetryOn: c.RateLimit.RetryOn, Backoff: c.RateLimit.Backoff.String(),
+		},
+		Log: logOut{Level: c.Log.Level, Format: c.Log.Format},
+		Metrics: metricsOut{Enabled: c.Metrics.Enabled, StateFile: c.Metrics.StateFile,
+			FlushEvery: c.Metrics.FlushEvery.String()},
+		Management: mgmtOut{AllowRemote: c.Management.AllowRemote,
+			SecretKeySet: strings.TrimSpace(c.Management.SecretKey) != ""},
+		KeysMasked:   keys,
+		APIKeys:      c.APIKeysMaskedPlain(),
+		AuthRequired: c.AuthRequired(),
+	}, "", "  ")
+}
+
+type tlsOut struct {
+	Enable bool   `json:"enable"`
+	Cert   string `json:"cert"`
+	Key    string `json:"key"`
+}
+type upstreamOut struct {
+	BaseURL        string `json:"base-url"`
+	DefaultModel   string `json:"default-model"`
+	ForceModel     bool   `json:"force-model"`
+	Timeout        string `json:"timeout"`
+	ConnectTimeout string `json:"connect-timeout"`
+	Keys           int    `json:"keys"`
+}
+type proxyOut struct {
+	Policy       string   `json:"policy"`
+	HealthEvery  string   `json:"health-every"`
+	FailCooldown string   `json:"fail-cooldown"`
+	SOCKS5       []string `json:"socks5"`
+}
+type rateOut struct {
+	RespectHeader bool   `json:"respect-header"`
+	MinRPMReserve int    `json:"min-rpm-reserve"`
+	Cooldown429   string `json:"cooldown-429"`
+	Cooldown5xx   string `json:"cooldown-5xx"`
+	ErrThreshold  int    `json:"err-threshold"`
+	ErrCooldown   string `json:"err-cooldown"`
+	DisableOn401  bool   `json:"disable-on-401"`
+	MaxRetries    int    `json:"max-retries"`
+	RetryOn       []int  `json:"retry-on"`
+	Backoff       string `json:"backoff"`
+}
+type logOut struct {
+	Level  string `json:"level"`
+	Format string `json:"format"`
+}
+type metricsOut struct {
+	Enabled    bool   `json:"enabled"`
+	StateFile  string `json:"state-file"`
+	FlushEvery string `json:"flush-every"`
+}
+type mgmtOut struct {
+	AllowRemote  bool `json:"allow-remote"`
+	SecretKeySet bool `json:"secret-key-set"`
+}
+
+// APIKeysMaskedPlain returns masked downstream keys (values only).
+func (c *Config) APIKeysMaskedPlain() []string {
+	out := make([]string, 0, len(c.APIKeys))
+	for _, k := range c.APIKeys {
+		if k = strings.TrimSpace(k); k != "" {
+			out = append(out, mask(k))
+		}
+	}
+	return out
+}
+
+// maskPathKey hides a private-key path's filename while keeping it recognizable.
+func maskPathKey(p string) string {
+	if p == "" {
+		return ""
+	}
+	if i := strings.LastIndex(p, "/"); i >= 0 {
+		return p[:i+1] + mask(filepath.Base(p))
+	}
+	return mask(p)
+}
+
+// maskProxyURL redacts userinfo from a proxy URL without URL-encoding the
+// placeholder (url.String() escapes userinfo, which makes the mask unreadable).
+func maskProxyURL(u string) string {
+	parsed, err := url.Parse(u)
+	if err != nil || parsed.User == nil {
+		return u
+	}
+	parsed.User = nil
+	return strings.Replace(parsed.String(), "://", "://***@", 1)
 }
 
 // ResolvePath expands ~ and makes a relative path absolute against baseDir.

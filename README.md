@@ -144,6 +144,9 @@ http://127.0.0.1:8318/v0/management/panel
 
 所有写操作立即生效，并原子回写 config.yaml（注意：回写会丢失文件里的注释）。
 管理 API 默认只允许本机访问，需要远程访问设 `remote-management.allow-remote: true`。
+管理密钥错误 4 次后该来源 IP 被锁定 15 分钟；密钥用常量时间比较，且 `GET /keys/x/disable`
+这类变更端点只接受 `POST`（GET 链接无法误触发）。
+面板返回的配置信息只含掩码（`atr_****ey`、代理 `socks5://***@host:port`、`secret-key-set` 布尔值），不含任何明文密钥。
 
 管理 API（默认仅允许回环访问）：
 

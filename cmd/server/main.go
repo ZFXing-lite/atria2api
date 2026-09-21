@@ -66,6 +66,12 @@ func main() {
 		}
 	}
 
+	// Usage metrics. Recording is gated by an atomic flag that follows config
+	// reloads; reading the cfg variable itself from the request goroutine would
+	// race with the watcher reassigning it.
+	var metricsEnabled atomic.Bool
+	metricsEnabled.Store(cfg.Metrics.Enabled)
+
 	relayer := relay.New(pool, proxies, relay.Config{
 		BaseURL:        cfg.Upstream.BaseURL,
 		DefaultModel:   cfg.Upstream.DefaultModel,
@@ -75,7 +81,7 @@ func main() {
 		MaxRetries:     cfg.RateLimit.MaxRetries,
 		Keepalive:      20 * time.Second,
 	}, func(keyID string, kind relay.Kind, model string, prompt, completion int) {
-		if cfg.Metrics.Enabled {
+		if metricsEnabled.Load() {
 			rec.Record(keyID, model, prompt, completion)
 		}
 	})
@@ -86,7 +92,9 @@ func main() {
 	// config changes (the management panel writes config.yaml too).
 	watcher := config.NewWatcher(cfgPath, func(newCfg *config.Config) {
 		pool.SetSettings(toSettings(newCfg))
-		pool.SyncKeys(toPoolKeys(newCfg))
+		// Config file is authoritative; reconcile the pool under the same lock
+		// the management API uses, so a reload can't race a live mutation.
+		srv.ApplyReload(newCfg, pool)
 		relayer.Update(relay.Config{
 			BaseURL:        newCfg.Upstream.BaseURL,
 			DefaultModel:   newCfg.Upstream.DefaultModel,
@@ -97,6 +105,7 @@ func main() {
 			Keepalive:      20 * time.Second,
 		})
 		srv.Update(newCfg)
+		metricsEnabled.Store(newCfg.Metrics.Enabled)
 		if countProxies(newCfg) != countProxies(cfg) {
 			slog.Warn("proxy list changed; restart to apply")
 		}
@@ -119,7 +128,7 @@ func main() {
 	}
 
 	if cfg.Metrics.Enabled {
-		// pprof on a separate localhost port, disabled by default.
+		// pprof on a separate localhost port whenever metrics are enabled.
 		go func() {
 			mux := http.NewServeMux()
 			mux.HandleFunc("/debug/pprof/", pprof.Index)

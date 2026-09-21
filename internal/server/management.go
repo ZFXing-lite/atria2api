@@ -1,15 +1,30 @@
 package server
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"log/slog"
+	"net"
 	"net/http"
 	"path"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/ZFXing-lite/atria2api/internal/config"
 	"github.com/ZFXing-lite/atria2api/internal/proxypool"
 )
+
+// loginGuard rate-limits management-key guesses per IP: after maxLoginFailures
+// wrong keys, that IP is locked out for loginLockout. Brute-forcing the
+// management secret then costs ~minutes per guess.
+const (
+	maxLoginFailures = 4
+	loginLockout     = 15 * time.Minute
+)
+
+var loginFails sync.Map // ip -> *int64
 
 // management exposes runtime controls plus the web panel. The whole group is
 // disabled (404) when remote-management.secret-key is empty.
@@ -29,15 +44,30 @@ func (s *Server) management(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Management disabled: 404 without touching the login guard, so probing a
+	// disabled endpoint cannot lock out a real IP.
+	if strings.TrimSpace(cfg.Management.SecretKey) == "" {
+		writeJSON(w, http.StatusNotFound, errBody("not found", "not_found"))
+		return
+	}
+
 	// Credential for the JSON API.
 	token := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer"))
 	if token == "" {
 		token = strings.TrimSpace(r.Header.Get("X-Management-Key"))
 	}
-	if token == "" || !subtle(cfg.Management.SecretKey, token) {
+	ip := clientIPOf(r)
+	if locked, until := loginLocked(ip); locked {
+		slog.Warn("management login locked out", "ip", ip, "until", until.Format(time.RFC3339))
+		writeJSON(w, http.StatusTooManyRequests, errBody("too many failed attempts, try again later", "rate_limited"))
+		return
+	}
+	if token == "" || subtle.ConstantTimeCompare([]byte(cfg.Management.SecretKey), []byte(token)) != 1 {
+		loginFail(ip)
 		writeJSON(w, http.StatusUnauthorized, errBody("invalid management key", "invalid_mgmt_key"))
 		return
 	}
+	loginReset(ip)
 	if !cfg.Management.AllowRemote && !isLoopback(r) {
 		writeJSON(w, http.StatusForbidden, errBody("remote management disabled", "remote_forbidden"))
 		return
@@ -66,19 +96,24 @@ func (s *Server) management(w http.ResponseWriter, r *http.Request) {
 		s.bulkAddUpstreamKeys(w, r)
 	case strings.HasPrefix(p, "/keys/") && r.Method == http.MethodDelete:
 		id := idFromPath(p)
-		if !s.pool.RemoveKey(id) || !s.mutateConfig(func(c *config.Config) bool { return c.RemoveUpstreamKey(id) }) {
+		// Mutate config first and persist; then drop from the live pool. The
+		// reverse order left a live key with no config entry on partial failure,
+		// and a later reload would resurrect it.
+		removed := s.mutateConfig(func(c *config.Config) bool { return c.RemoveUpstreamKey(id) })
+		if !removed {
 			writeJSON(w, http.StatusNotFound, errBody("unknown key id", "unknown_key"))
 			return
 		}
+		s.pool.RemoveKey(id) // id is gone from config; pool may not have it
 		slog.Info("upstream key removed", "id", id)
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
-	case strings.HasPrefix(p, "/keys/") && strings.HasSuffix(p, "/disable"):
+	case strings.HasPrefix(p, "/keys/") && strings.HasSuffix(p, "/disable") && r.Method == http.MethodPost:
 		if s.pool.Disable(idFromPath(p)) {
 			writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 		} else {
 			writeJSON(w, http.StatusNotFound, errBody("unknown key id", "unknown_key"))
 		}
-	case strings.HasPrefix(p, "/keys/") && strings.HasSuffix(p, "/enable"):
+	case strings.HasPrefix(p, "/keys/") && strings.HasSuffix(p, "/enable") && r.Method == http.MethodPost:
 		if s.pool.Enable(idFromPath(p)) {
 			writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 		} else {
@@ -112,8 +147,26 @@ func (s *Server) management(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"proxies": proxyStatusList(s.proxies)})
 
 	default:
+		// Known endpoints with the wrong method return 405 instead of 404, so a
+		// GET link cannot silently perform a mutation and the caller learns why.
+		if isKnownManagementPath(p) {
+			writeJSON(w, http.StatusMethodNotAllowed, errBody("method not allowed", "method_not_allowed"))
+			return
+		}
 		writeJSON(w, http.StatusNotFound, errBody("unknown management endpoint", "not_found"))
 	}
+}
+
+// isKnownManagementPath reports whether p matches a route whose method differs
+// from the one the caller used.
+func isKnownManagementPath(p string) bool {
+	switch {
+	case strings.HasPrefix(p, "/keys/"):
+		return strings.HasSuffix(p, "/disable") || strings.HasSuffix(p, "/enable")
+	case strings.HasPrefix(p, "/api-keys/"):
+		return true
+	}
+	return false
 }
 
 func proxyStatusList(p *proxypool.Pool) []proxypool.Status {
@@ -228,8 +281,13 @@ func (s *Server) addAPIKey(w http.ResponseWriter, r *http.Request) {
 }
 
 // mutateConfig applies fn to a copy of the live config, publishes it to all
-// components and persists it atomically.
+// components and persists it atomically. The whole read-modify-write is
+// serialized: concurrent management requests would otherwise each replay from
+// a stale snapshot and silently drop each other's changes.
 func (s *Server) mutateConfig(fn func(*config.Config) bool) bool {
+	s.mgmtMu.Lock()
+	defer s.mgmtMu.Unlock()
+
 	cur := s.cfg.Load()
 	cp := *cur
 	cp.Upstream.Keys = append([]config.UpstreamKey(nil), cur.Upstream.Keys...)
@@ -238,13 +296,17 @@ func (s *Server) mutateConfig(fn func(*config.Config) bool) bool {
 	if !fn(&cp) {
 		return false
 	}
-	s.Update(&cp)
+	// Persist before publishing: a failed write would otherwise make the live
+	// pool drift from what survives a restart.
 	if err := cp.Save(s.configPath); err != nil {
 		slog.Error("persist config failed", "err", err)
-		// The live config is already updated; a failed write only means the
-		// change may not survive a restart.
-		return true
+		return false
 	}
+	// Config on disk is now authoritative; reconcile the pool to it. Keys still
+	// in flight keep working: SyncKeys only drops pool entries that are gone
+	// from config, and they were just removed by fn above.
+	s.Update(&cp)
+	s.pool.SyncKeys(toPoolKeys(&cp))
 	return true
 }
 
@@ -294,26 +356,51 @@ func idFromPath(p string) string {
 	return path.Clean("/" + p)[1:]
 }
 
+// isLoopback reports whether the request came from this machine. Only
+// RemoteAddr is trusted: r.Host and X-Forwarded-For are client-controlled and
+// would otherwise bypass allow-remote: false.
 func isLoopback(r *http.Request) bool {
-	host := r.Host
-	if h := strings.Split(host, ":")[0]; h == "localhost" || h == "127.0.0.1" || h == "::1" {
-		return true
-	}
 	ip := r.RemoteAddr
 	if i := strings.LastIndex(ip, ":"); i > 0 {
 		ip = ip[:i]
 	}
 	ip = strings.Trim(ip, "[]")
-	return ip == "127.0.0.1" || ip == "::1" || ip == ""
+	switch ip {
+	case "127.0.0.1", "::1", "":
+		return true
+	}
+	if h, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		switch h {
+		case "127.0.0.1", "::1":
+			return true
+		}
+	}
+	return false
 }
 
-func subtle(a, b string) bool {
-	if len(a) != len(b) {
-		return false
+func clientIPOf(r *http.Request) string {
+	ip := r.RemoteAddr
+	if h, _, err := net.SplitHostPort(ip); err == nil {
+		return h
 	}
-	var d byte
-	for i := 0; i < len(a); i++ {
-		d |= a[i] ^ b[i]
-	}
-	return d == 0
+	return ip
 }
+
+func loginLocked(ip string) (bool, time.Time) {
+	v, ok := loginFails.Load(ip)
+	if !ok {
+		return false, time.Time{}
+	}
+	n := atomic.LoadInt64(v.(*int64))
+	if n < int64(maxLoginFailures) {
+		return false, time.Time{}
+	}
+	return true, time.Now().Add(loginLockout)
+}
+
+func loginFail(ip string) {
+	v, _ := loginFails.LoadOrStore(ip, new(int64))
+	atomic.AddInt64(v.(*int64), 1)
+}
+
+func loginReset(ip string) { loginFails.Delete(ip) }

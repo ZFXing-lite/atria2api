@@ -74,8 +74,6 @@ type Entry struct {
 	Weight int    `json:"weight"`
 	Proxy  string `json:"proxy,omitempty"`
 
-	mu sync.Mutex
-
 	disabled       bool      `json:"-"` // system: key invalid/revoked (401)
 	manualDisabled bool      `json:"-"` // ops: disabled via management API
 	until          time.Time `json:"-"`
@@ -363,6 +361,14 @@ func (p *Pool) NoteResult(l Lease, o Outcome) {
 			slog.Warn("key degraded after consecutive transport errors",
 				"key", e.ID, "until", e.degradeUntil.Format(time.RFC3339))
 		}
+	case o.Err != nil:
+		// A failure after a 2xx status was received — most often a stream that
+		// broke mid-way. It must not count as a success, and the existing
+		// cooldowns have to survive: clearing them would let a sick key keep
+		// serving. Treat it as a soft error without clearing breaker state.
+		e.errorCount++
+		e.failCount++
+		slog.Warn("upstream call failed after 2xx", "key", e.ID, "status", o.StatusCode, "err", o.Err)
 	case o.StatusCode == 401:
 		e.errorCount++
 		if s.DisableOn401 {
@@ -467,7 +473,10 @@ func (p *Pool) RetryDelay(attempt int) time.Duration {
 		base = time.Second
 	}
 	d := base * time.Duration(1<<min(attempt, 6))
+	// p.rng is not concurrency safe: it is also used under p.mu in Pick.
+	p.mu.Lock()
 	jitter := 0.75 + p.rng.Float64()*0.5
+	p.mu.Unlock()
 	return time.Duration(float64(d) * jitter)
 }
 
@@ -588,12 +597,31 @@ func (p *Pool) SyncKeys(keys []UpstreamKey) {
 			delete(p.byID, id)
 		}
 	}
+	// Rebuild order following the caller's config order so the selection order
+	// stays stable across reloads instead of shuffling by id hash.
 	p.order = p.order[:0]
-	for id := range p.byID {
-		p.order = append(p.order, id)
+	for _, k := range keys {
+		if id := idOf(strings.TrimSpace(k.Key)); id != "" && p.byID[id] != nil {
+			p.order = append(p.order, id)
+		}
 	}
-	sort.Strings(p.order)
+	// Any pool-only keys not in the config list (should not happen after the
+	// delete pass above) keep their existing order rather than being dropped.
+	for id := range p.byID {
+		if !containsIDs(p.order, id) {
+			p.order = append(p.order, id)
+		}
+	}
 	p.dirty.Store(true)
+}
+
+func containsIDs(ids []string, id string) bool {
+	for _, v := range ids {
+		if v == id {
+			return true
+		}
+	}
+	return false
 }
 
 // --- persistence ---------------------------------------------------------

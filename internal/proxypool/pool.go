@@ -4,11 +4,8 @@ package proxypool
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/binary"
 	"fmt"
 	"log/slog"
-	"math/big"
 	mrand "math/rand"
 	"net"
 	"net/http"
@@ -32,12 +29,13 @@ const (
 // Pool is a concurrency-safe SOCKS5 proxy pool. A zero pool (Empty()==true)
 // yields direct (no-proxy) transports.
 type Pool struct {
-	mu           sync.RWMutex
-	entries      []*entry
-	policy       Policy
-	failCooldown time.Duration
-	rr           uint64 // round-robin counter
-	rng          *mrand.Rand
+	mu             sync.RWMutex
+	entries        []*entry
+	policy         Policy
+	failCooldown   time.Duration
+	rr             uint64 // round-robin counter
+	rng            *mrand.Rand
+	transportCache sync.Map // key -> *http.Transport (keyed for reuse)
 }
 
 type entry struct {
@@ -178,22 +176,17 @@ func (p *Pool) weightedRand(entries []*entry) int {
 	return len(entries) - 1
 }
 
-// stableIndex maps keyHint deterministically into [0, n).
+// stableIndex maps keyHint deterministically into [0, n) with FNV-1a 64. The
+// same key always lands on the same proxy while the entry list is unchanged —
+// that is the point of the sticky-key policy.
 func stableIndex(keyHint string, n int) int {
 	if n <= 1 {
 		return 0
 	}
-	var h [8]byte
-	// FNV-1a 64
 	var hash uint64 = 1469598103934665603
 	for i := 0; i < len(keyHint); i++ {
 		hash ^= uint64(keyHint[i])
 		hash *= 1099511628211
-	}
-	binary.BigEndian.PutUint64(h[:], hash)
-	v, err := rand.Int(rand.Reader, big.NewInt(int64(n)))
-	if err == nil {
-		return int(v.Int64())
 	}
 	return int(hash % uint64(n))
 }
@@ -248,14 +241,15 @@ func dialerFor(rawURL string) (proxy.Dialer, error) {
 }
 
 // Transport builds an *http.Transport that dials through a pool proxy chosen
-// at dial time. When the pool is empty it returns a direct transport.
-// onProxy is called (best effort) with the proxy URL actually used so callers
-// can record success/failure against the right entry.
+// at dial time. When the pool is empty it returns a direct transport. The
+// transport is cached per pool so TCP+TLS connections are reused across
+// requests instead of being re-established on every call.
 func (p *Pool) Transport(keyHint string, onProxy func(string)) *http.Transport {
 	if p == nil || p.Empty() {
 		return baseTransport()
 	}
-	t := baseTransport()
+	v, _ := p.transportCache.LoadOrStore("__pool__", baseTransport())
+	t := v.(*http.Transport)
 	t.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 		proxyURL := p.Pick(keyHint)
 		if proxyURL == "" {

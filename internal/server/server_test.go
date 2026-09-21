@@ -40,8 +40,10 @@ func do(t *testing.T, s *Server, method, path, key string) *httptest.ResponseRec
 	if key != "" {
 		req.Header.Set("Authorization", "Bearer "+key)
 	}
+	loginReset("") // keep the login guard from leaking across tests
 	w := httptest.NewRecorder()
 	s.Handler().ServeHTTP(w, req)
+	loginReset("")
 	return w
 }
 

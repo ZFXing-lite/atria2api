@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -144,6 +145,7 @@ func (r *Relayer) Handle(w http.ResponseWriter, req *http.Request, kind Kind) {
 	var lastUpstreamBody []byte
 	var lastErr string
 	var poolErr error
+	committed := false // true once any bytes were written to the client
 
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		if attempt > 0 {
@@ -165,6 +167,9 @@ func (r *Relayer) Handle(w http.ResponseWriter, req *http.Request, kind Kind) {
 
 		status, upstreamBody, streamed, ferr, limits := r.forwardOnce(w, req, kind, cfg, lease, body, streaming)
 		lastStatus = status
+		if streamed {
+			committed = true
+		}
 
 		o := keypool.Outcome{
 			StatusCode: status,
@@ -203,12 +208,21 @@ func (r *Relayer) Handle(w http.ResponseWriter, req *http.Request, kind Kind) {
 		}
 	}
 
-	// Exhausted: surface the last upstream response verbatim if we have one.
-	if lastUpstreamBody != nil {
+	// Exhausted: surface the last upstream response verbatim, but only if the
+	// client response is not already committed — appending a JSON error body to
+	// a half-written SSE stream would corrupt the response (and superfluous
+	// WriteHeader would be logged by net/http).
+	if !committed && lastUpstreamBody != nil {
 		hdr := w.Header()
 		hdr.Set("Content-Type", "application/json")
 		writeBody(w, lastStatus, lastUpstreamBody)
 		r.log.Warn("request failed after retries", "kind", kind, "status", lastStatus, "err", lastErr)
+		return
+	}
+	if committed {
+		// The error was already injected into the stream (or the client went
+		// away). Nothing more can be written.
+		r.log.Warn("request failed after stream committed", "kind", kind, "status", lastStatus, "err", lastErr)
 		return
 	}
 	code := http.StatusBadGateway
@@ -268,6 +282,9 @@ func (r *Relayer) forwardOnce(w http.ResponseWriter, req *http.Request, kind Kin
 		Transport: r.transportFor(lease, cfg),
 		Timeout:   cfg.Timeout,
 	}
+	if cfg.ConnectTimeout > 0 {
+		client.Transport = withConnectTimeout(client.Transport, cfg.ConnectTimeout)
+	}
 	resp, err := client.Do(upReq)
 	if err != nil {
 		return 0, nil, false, err, limits
@@ -279,7 +296,7 @@ func (r *Relayer) forwardOnce(w http.ResponseWriter, req *http.Request, kind Kin
 
 	// Non-streaming, or any error: buffer the body so the caller can decide.
 	if status >= 400 || !streaming {
-		buf, err := io.ReadAll(io.LimitReader(resp.Body, defaultMaxBody+1))
+		buf, err := io.ReadAll(io.LimitReader(resp.Body, cfg.MaxBodyBytes+1))
 		if err != nil {
 			return status, nil, false, err, limits
 		}
@@ -671,4 +688,18 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "..."
+}
+
+// withConnectTimeout bounds just the connection setup (dial + TLS handshake)
+// so a dead upstream is abandoned before cfg.Timeout's full budget is spent.
+func withConnectTimeout(rt http.RoundTripper, d time.Duration) http.RoundTripper {
+	t, ok := rt.(*http.Transport)
+	if !ok {
+		return rt
+	}
+	cp := t.Clone()
+	cp.DialContext = (&net.Dialer{Timeout: d, KeepAlive: 20 * time.Second}).DialContext
+	cp.TLSHandshakeTimeout = d
+	cp.ExpectContinueTimeout = d
+	return cp
 }
