@@ -367,6 +367,12 @@ func applyEnv(c *Config) error {
 	if v := strings.TrimSpace(get("ATRIA2API_MGMT_KEY")); v != "" {
 		c.Management.SecretKey = v
 	}
+	// ATRIA2API_ALLOW_REMOTE opens the management panel to the public
+	// internet. It only takes effect together with ATRIA2API_MGMT_KEY (or a
+	// secret-key in config): a panel with no password is never remote-enabled.
+	if v := strings.TrimSpace(get("ATRIA2API_ALLOW_REMOTE")); v != "" {
+		c.Management.AllowRemote = v == "1" || strings.EqualFold(v, "true") || strings.EqualFold(v, "yes")
+	}
 	return nil
 }
 

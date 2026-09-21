@@ -72,5 +72,12 @@ metrics:
 
 # Management API (/v0/management/*). Empty secret-key disables it (404).
 remote-management:
-  allow-remote: false       # loopback-only when false
+  # false = management panel and API only accept loopback (127.0.0.1) clients.
+  # Set true to expose the panel on the public internet; combine with a strong
+  # secret-key. Same as env ATRIA2API_ALLOW_REMOTE=1.
+  allow-remote: false
+  # Panel login password and management-API credential. Independent from the
+  # api-keys above (those are what your clients call the gateway with); a
+  # downstream key cannot log into the panel and this cannot call /v1/*.
+  # Env override: ATRIA2API_MGMT_KEY. Empty = whole group returns 404.
   secret-key: ""

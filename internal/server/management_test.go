@@ -317,3 +317,90 @@ func TestManagementLoginRateLimited(t *testing.T) {
 	}
 	loginReset(ip) // leave the locked bucket clean for other tests
 }
+
+// TestPanelPasswordIsolatedFromAPIKeys is the separation guarantee: the panel
+// password (management secret-key) and the downstream keys clients call /v1/*
+// with must not authenticate for each other.
+func TestPanelPasswordIsolatedFromAPIKeys(t *testing.T) {
+	s, _ := mgmtServer(t)
+	cfg := *s.cfg.Load()
+	cfg.Management.SecretKey = "panel-pass"
+	cfg.Management.AllowRemote = true
+	cfg.APIKeys = []string{"client-key"}
+	s.Update(&cfg)
+	loginReset("127.0.0.1")
+
+	// 1) Panel password logs into the panel.
+	req := httptest.NewRequest("GET", "/v0/management/keys", nil)
+	req.RemoteAddr = "10.0.0.9:1111"
+	req.Header.Set("X-Management-Key", "panel-pass")
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("panel password must open the panel, got %d", w.Code)
+	}
+
+	// 2) A downstream API key must NOT log into the panel.
+	req2 := httptest.NewRequest("GET", "/v0/management/keys", nil)
+	req2.RemoteAddr = "10.0.0.9:1111"
+	req2.Header.Set("X-Management-Key", "client-key")
+	w2 := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w2, req2)
+	if w2.Code != 401 {
+		t.Fatalf("downstream api key must not open the panel, got %d", w2.Code)
+	}
+
+	// 3) The panel password must NOT call /v1/* as a bearer token.
+	req3 := httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"Atria-Dawn-Preview","messages":[]}`))
+	req3.Header.Set("Content-Type", "application/json")
+	req3.Header.Set("Authorization", "Bearer panel-pass")
+	w3 := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w3, req3)
+	if w3.Code != 401 {
+		t.Fatalf("panel password must not call /v1/*, got %d", w3.Code)
+	}
+
+	// 4) A downstream key still calls /v1/* fine (unaffected by panel changes).
+	req4 := httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"Atria-Dawn-Preview","messages":[]}`))
+	req4.Header.Set("Content-Type", "application/json")
+	req4.Header.Set("Authorization", "Bearer client-key")
+	w4 := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w4, req4)
+	if w4.Code == 401 {
+		t.Fatalf("downstream key stopped working: %s", w4.Body.String())
+	}
+}
+
+// TestPanelPublicPageRemoteBlocked: the panel HTML is served to anyone, but
+// with allow-remote=false a remote holder of the correct password still gets
+// 403 on the data API — and the password itself stays unverifiable.
+func TestPanelPublicPageRemoteBlocked(t *testing.T) {
+	s, _ := mgmtServer(t)
+	cfg := *s.cfg.Load()
+	cfg.Management.SecretKey = "panel-pass"
+	cfg.Management.AllowRemote = false
+	s.Update(&cfg)
+	loginReset("10.0.0.9")
+
+	// Page itself loads from anywhere.
+	req := httptest.NewRequest("GET", "/v0/management/panel", nil)
+	req.RemoteAddr = "10.0.0.9:1111"
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, req)
+	if w.Code != 200 || !strings.Contains(w.Body.String(), "控制面板") {
+		t.Fatalf("panel page must be public, got %d", w.Code)
+	}
+
+	// Data API refuses a remote client even with the right password.
+	req2 := httptest.NewRequest("GET", "/v0/management/keys", nil)
+	req2.RemoteAddr = "10.0.0.9:1111"
+	req2.Header.Set("X-Management-Key", "panel-pass")
+	w2 := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w2, req2)
+	if w2.Code != 403 {
+		t.Fatalf("remote client must be 403 without allow-remote, got %d", w2.Code)
+	}
+	loginReset("10.0.0.9")
+}

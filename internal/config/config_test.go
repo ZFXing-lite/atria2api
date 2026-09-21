@@ -111,3 +111,53 @@ func contains(haystack, needle string) bool {
 	}
 	return len(needle) == 0
 }
+
+func TestEnvAllowRemoteAndMgmtKey(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "c.yaml")
+	os.WriteFile(p, []byte("host: 127.0.0.1\nport: 8318\nupstream:\n  keys:\n    - key: atr_t\n"), 0o600)
+
+	t.Run("off by default", func(t *testing.T) {
+		c, err := Load(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.Management.AllowRemote {
+			t.Fatal("allow-remote must default to false")
+		}
+	})
+	t.Run("env enables remote and sets key", func(t *testing.T) {
+		t.Setenv("ATRIA2API_ALLOW_REMOTE", "1")
+		t.Setenv("ATRIA2API_MGMT_KEY", "panel-pass")
+		c, err := Load(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !c.Management.AllowRemote {
+			t.Fatal("ATRIA2API_ALLOW_REMOTE=1 must enable remote")
+		}
+		if c.Management.SecretKey != "panel-pass" {
+			t.Fatalf("mgmt key not applied: %q", c.Management.SecretKey)
+		}
+	})
+	t.Run("env truthy spellings", func(t *testing.T) {
+		for _, v := range []string{"true", "TRUE", "yes", "1"} {
+			t.Setenv("ATRIA2API_ALLOW_REMOTE", v)
+			c, err := Load(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !c.Management.AllowRemote {
+				t.Fatalf("%q must be treated as true", v)
+			}
+		}
+		t.Setenv("ATRIA2API_ALLOW_REMOTE", "0")
+		c, err := Load(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.Management.AllowRemote {
+			t.Fatal("\"0\" must not enable remote")
+		}
+	})
+}

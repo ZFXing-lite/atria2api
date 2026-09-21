@@ -148,6 +148,31 @@ http://127.0.0.1:8318/v0/management/panel
 这类变更端点只接受 `POST`（GET 链接无法误触发）。
 面板返回的配置信息只含掩码（`atr_****ey`、代理 `socks5://***@host:port`、`secret-key-set` 布尔值），不含任何明文密钥。
 
+### 公网部署面板
+
+面板页面本身是公开 HTML，任何人都能打开登录页；但所有数据接口都要密码，
+且默认只接受本机访问。公网开放只需两步：
+
+```bash
+docker run -p 8318:8318 \
+  -e ATRIA2API_MGMT_KEY=你的面板密码 \
+  -e ATRIA2API_ALLOW_REMOTE=1 \
+  -v "$PWD/config.yaml:/app/config.yaml:ro" \
+  atria2api
+```
+
+然后浏览器访问 `http://你的服务器IP:8318/v0/management/panel`，输入密码即可。
+等价的配置文件写法是 `remote-management: {allow-remote: true, secret-key: 你的面板密码}`。
+
+**面板密码与下游调用 key 完全独立**：
+
+- 面板密码（`remote-management.secret-key` / `ATRIA2API_MGMT_KEY`）只用于登录面板和管理 API
+- 下游调用 key（`api-keys` / `ATRIA2API_API_KEYS`）只用于客户端调用 `/v1/*`
+- 下游 key 登不上面板，面板密码也调不了 `/v1/*`，两者互不影响，删除/修改一侧不动另一侧
+
+公网开放前的安全清单：密码足够长（登录限速只能拖慢暴破）；上 TLS 或放在反代后面
+（否则密码明文过网）；确认 `allow-remote: true` 只在你确实需要时开启。
+
 管理 API（默认仅允许回环访问）：
 
 ```bash

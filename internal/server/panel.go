@@ -77,7 +77,7 @@ const panelHTML = `<!DOCTYPE html>
 <div id="login">
   <div class="box">
     <h2>atria2api 控制面板</h2>
-    <p>请输入管理密钥（remote-management.secret-key）。密钥仅保存在当前浏览器会话。</p>
+    <p>请输入面板登录密码（部署时设定的管理密钥）。密码仅保存在当前浏览器会话，与下游调用 key 互相独立。</p>
     <input id="mgmtKey" type="password" placeholder="管理密钥" onkeydown="if(event.key==='Enter')doLogin()">
     <button class="btn primary" style="width:100%" onclick="doLogin()">登录</button>
     <div id="loginErr" class="err" style="margin-top:8px;font-size:12px"></div>
@@ -193,14 +193,26 @@ function doLogin() {
   KEY = document.getElementById('mgmtKey').value.trim();
   fetch('/v0/management/stats', {headers: hdr()})
     .then(function(r){
-      if (!r.ok) throw 0;
+      if (!r.ok) {
+        // Distinguish the two public-internet failure modes: a wrong password
+        // (401) versus a deployment that has not enabled remote management
+        // (403) — the panel loaded fine but every data call is refused.
+        var msg = '密钥无效（401）';
+        if (r.status === 403) {
+          msg = '本面板未开放公网访问：服务端需设 allow-remote: true（或环境变量 ATRIA2API_ALLOW_REMOTE=1）';
+        } else if (r.status === 404) {
+          msg = '管理功能未启用：服务端需设定管理密钥（secret-key 或 ATRIA2API_MGMT_KEY）';
+        } else if (r.status === 429) {
+          msg = '尝试次数过多，该 IP 已被锁定 15 分钟';
+        }
+        document.getElementById('loginErr').textContent = msg;
+        throw 0;
+      }
       sessionStorage.setItem('atria2api_mgmt', KEY);
       document.getElementById('login').style.display='none';
       start();
     })
-    .catch(function(){
-      document.getElementById('loginErr').textContent = '密钥无效或被拒绝（401/403）';
-    });
+    .catch(function(){});
 }
 function logout() { sessionStorage.removeItem('atria2api_mgmt'); location.reload(); }
 function hdr() { return {'X-Management-Key': KEY, 'Content-Type':'application/json'}; }
