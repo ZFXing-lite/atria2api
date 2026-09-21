@@ -56,6 +56,7 @@ const panelHTML = `<!DOCTYPE html>
   .muted { color:var(--dim); }
   .err { color:var(--red); }
   .right { text-align:right; }
+  .num { text-align:right; font-variant-numeric:tabular-nums; }
   #toast { position:fixed; bottom:22px; left:50%; transform:translateX(-50%);
     background:var(--panel); border:1px solid var(--accent); color:var(--text);
     padding:9px 18px; border-radius:8px; opacity:0; transition:opacity .25s; pointer-events:none; z-index:99; }
@@ -102,7 +103,8 @@ const panelHTML = `<!DOCTYPE html>
     <table>
       <thead><tr>
         <th>Key (掩码)</th><th>权重</th><th>状态</th><th>原因</th><th>到期</th>
-        <th>RPM 余量</th><th>进行中</th><th>成功/失败</th><th class="right">操作</th>
+        <th>RPM 余量</th><th>进行中</th><th>成功/失败</th><th>请求数</th>
+        <th>输入 tokens</th><th>输出 tokens</th><th>合计 tokens</th><th class="right">操作</th>
       </tr></thead>
       <tbody id="keysBody"></tbody>
     </table>
@@ -244,7 +246,7 @@ function refresh() {
     api('/v0/management/usage').catch(function(){ return {enabled:false}; }),
     api('/v0/management/proxies')
   ]).then(function(all){
-    renderOverview(all[0]); renderKeys(all[0], all[1]); renderAPIKeys(all[2]);
+    renderOverview(all[0]); renderKeys(all[0], all[1], all[3]); renderAPIKeys(all[2]);
     renderStats(all[0]); renderProxies(all[0], all[4]); renderUsage(all[3]);
     document.getElementById('healthDot').className =
       'dot' + (all[0].keys_healthy>0 ? '' : ' off');
@@ -283,22 +285,33 @@ function renderOverview(s) {
   refreshLbl('每 2.5 秒自动刷新');
 }
 
-function renderKeys(s, keys) {
+function renderKeys(s, keys, usage) {
   document.getElementById('keysPill').textContent = s.keys_healthy + '/' + s.keys_total;
+  var byID = (usage && usage.keys) || {};
   var rows = (keys.keys||[]).map(function(k){
     var until = (k.until && k.until.indexOf('0001-')!==0) ? fmtTime(k.until) : '-';
     var act = k.state==='disabled' || k.state==='manual_off'
       ? '<button class="btn sm" onclick="keyAct(\''+k.id+'\',\'enable\')">启用</button>'
       : '<button class="btn sm" onclick="keyAct(\''+k.id+'\',\'disable\')">禁用</button>';
     act += ' <button class="btn sm danger" onclick="keyAct(\''+k.id+'\',\'del\')">删除</button>';
+    var u = byID[k.id] || {};
     return '<tr><td class="mono">'+esc(k.id)+'</td><td>'+k.weight+'</td>'
       + '<td>'+pill(k.state)+'</td><td class="muted">'+esc(k.reason||'-')+'</td>'
       + '<td>'+until+'</td>'
       + '<td>'+(k.rpm_limit ? (k.rpm_remaining+' / '+k.rpm_limit) : '-')+'</td>'
       + '<td>'+k.inflight+'</td><td>'+k.success_count+' / <span class="'+(k.error_count?'err':'')+'">'+k.error_count+'</span></td>'
+      + '<td class="num">'+(u.requests||0)+'</td>'
+      + '<td class="num">'+fmtTokens(u.prompt_tokens||0)+'</td>'
+      + '<td class="num">'+fmtTokens(u.completion_tokens||0)+'</td>'
+      + '<td class="num">'+fmtTokens((u.prompt_tokens||0)+(u.completion_tokens||0))+'</td>'
       + '<td class="right">'+act+'</td></tr>';
-  }).join('') || '<tr><td colspan="9" class="muted">暂无上游 key，在下方添加</td></tr>';
+  }).join('') || '<tr><td colspan="13" class="muted">暂无上游 key，在下方添加</td></tr>';
   document.getElementById('keysBody').innerHTML = rows;
+}
+
+// fmtTokens groups digits for readability: 1234567 -> 1,234,567
+function fmtTokens(n) {
+  return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
 }
 
 function keyAct(id, action) {

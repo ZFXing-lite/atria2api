@@ -190,8 +190,9 @@ func (r *Relayer) Handle(w http.ResponseWriter, req *http.Request, kind Kind) {
 		lease.Release()
 
 		if ferr == nil && status < 400 {
-			// Success. Streaming responses were already written straight to
-			// the client; buffered ones still need to be sent here.
+			// Success. Streaming responses (including a non-SSE body forwarded
+			// by pipeStream) were already written to the client; buffered ones
+			// still need to be sent here.
 			if !streamed && upstreamBody != nil {
 				hdr := w.Header()
 				hdr.Set("Content-Type", "application/json")
@@ -329,6 +330,15 @@ func (r *Relayer) forwardOnce(w http.ResponseWriter, req *http.Request, kind Kin
 	if cw == nil || cw.n == 0 {
 		return status, nil, false, fmt.Errorf("upstream stream ended with no data"), limits
 	}
+	if !cw.sse {
+		// The client asked for a stream but upstream answered with a buffered
+		// JSON body. It was already forwarded verbatim with the upstream
+		// content-type; report it as committed (streamed) so the caller does
+		// not write it a second time, and record usage from the whole body.
+		body := cw.whole.Bytes()
+		r.recordUsage(kind, lease, body)
+		return status, body, true, nil, limits
+	}
 	if u := findUsageInStream(cw.tail.Bytes(), kind); u.ok {
 		r.recordUsageVal(kind, lease, u)
 	}
@@ -396,6 +406,37 @@ func (r *Relayer) pipeStream(w http.ResponseWriter, req *http.Request, resp *htt
 		select {
 		case c := <-ch:
 			if !committed {
+				// Peek the first chunk: a client may ask for a stream and get a
+				// buffered JSON body (error or non-SSE upstream). Only commit
+				// SSE headers when the payload really is a stream, otherwise
+				// forward it as a plain response with the upstream content-type.
+				if !looksLikeSSE(c.data) {
+					cw.sse = false
+					ct := resp.Header.Get("Content-Type")
+					if ct == "" {
+						ct = "application/json"
+					}
+					w.Header().Set("Content-Type", ct)
+					committed = true
+					cw.whole.Write(c.data)
+					// Drain the rest into whole.
+					for {
+						select {
+						case d := <-ch:
+							cw.whole.Write(d.data)
+						case err := <-errc:
+							cw.n = int64(cw.whole.Len())
+							writeBody(w, resp.StatusCode, cw.whole.Bytes())
+							if err == io.EOF || err == req.Context().Err() {
+								return cw, committed, nil
+							}
+							return cw, committed, err
+						case <-req.Context().Done():
+							return cw, committed, req.Context().Err()
+						}
+					}
+				}
+				cw.sse = true
 				writeSSEHeaders(w)
 				committed = true
 			}
@@ -470,7 +511,9 @@ func parseUsage(kind Kind, body []byte) usage {
 	return u
 }
 
-// findUsageInStream scans SSE data lines for the last usage payload.
+// findUsageInStream scans SSE data lines for the last usage payload. If the
+// stream tail is not SSE-shaped (upstream answered a stream request with a
+// plain JSON body), fall back to parsing the whole buffer.
 func findUsageInStream(tail []byte, kind Kind) usage {
 	var last []byte
 	for _, line := range bytes.Split(tail, []byte("\n")) {
@@ -485,10 +528,10 @@ func findUsageInStream(tail []byte, kind Kind) usage {
 			last = payload
 		}
 	}
-	if last == nil {
-		return usage{}
+	if last != nil {
+		return parseUsage(kind, last)
 	}
-	return parseUsage(kind, last)
+	return parseUsage(kind, tail)
 }
 func (r *Relayer) transportFor(lease keypool.Lease, cfg Config) http.RoundTripper {
 	if ov := strings.TrimSpace(lease.ProxyURL); ov != "" {
@@ -625,6 +668,17 @@ type countingWriter struct {
 	flusher http.Flusher
 	n       int64
 	tail    *ring
+	// sse reports whether the piped payload was really an SSE stream. A client
+	// may request a stream and receive a buffered JSON body; whole holds it.
+	sse   bool
+	whole bytes.Buffer
+}
+
+// looksLikeSSE reports whether a first chunk has the shape of an event stream.
+func looksLikeSSE(b []byte) bool {
+	s := string(b)
+	return strings.Contains(s, "data:") || strings.HasPrefix(s, "event:") ||
+		strings.HasPrefix(s, ":") || strings.Contains(s, "\n\n")
 }
 
 func (c *countingWriter) Write(p []byte) (int, error) {

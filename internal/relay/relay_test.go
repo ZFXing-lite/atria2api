@@ -298,3 +298,44 @@ func TestMain(m *testing.M) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
 	m.Run()
 }
+
+// TestStreamRequestGetsJSONBody covers the case where the client asks for a
+// stream but the upstream answers with a buffered JSON body. The gateway must
+// not declare text/event-stream, and the usage must be recorded.
+func TestStreamRequestGetsJSONBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte(`{"id":"1","model":"Atria-Dawn-Preview","choices":[{"message":{"content":"hi"}}],"usage":{"prompt_tokens":11,"completion_tokens":4}}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	pool := keypool.New([]keypool.UpstreamKey{{Key: "k"}}, keypool.Settings{}, "")
+	var got promptCapture
+	r := New(pool, nil, Config{
+		BaseURL: srv.URL, DefaultModel: "Atria-Dawn-Preview", ForceModel: true, Timeout: 10 * time.Second,
+	}, got.hook)
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"Atria-Dawn-Preview","stream":true,"messages":[]}`))
+	w := httptest.NewRecorder()
+	r.Handle(w, req, KindChat)
+
+	if w.Code != 200 {
+		t.Fatalf("status %d", w.Code)
+	}
+	if ct := w.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		t.Fatalf("content-type must be the upstream JSON, got %q; body %s", ct, w.Body.String())
+	}
+	if got.prompt != 11 || got.completion != 4 {
+		t.Fatalf("usage not recorded from non-SSE answer: prompt=%d completion=%d", got.prompt, got.completion)
+	}
+}
+
+type promptCapture struct {
+	prompt, completion int
+}
+
+func (p *promptCapture) hook(keyID string, kind Kind, model string, pr, co int) {
+	p.prompt, p.completion = pr, co
+}
