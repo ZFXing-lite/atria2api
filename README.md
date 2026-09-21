@@ -1,48 +1,45 @@
 # atria2api
 
-A dedicated gateway for the [Atria Dawn Preview API](https://api.atria-asi.ai/docs).
-Point any OpenAI / Anthropic / Responses-compatible client at it, fill in one or
-more `atr_` keys, and it takes care of key rotation, rate-limit handling,
-retries and SOCKS5 egress.
+[English](README_EN.md) | 简体中文
 
-Built with the same patterns as [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI),
-[autoclaw2api](https://github.com/ZFXing-lite/autoclaw2api) and
-[workbuddy2api](https://github.com/Sliverkiss/workbuddy2api): a single binary,
-one YAML config, no database, zero runtime dependencies.
+[Atria Dawn Preview API](https://api.atria-asi.ai/docs) 的专属网关。把任意
+OpenAI / Anthropic / Responses 兼容客户端指向它，填入一个或多个 `atr_` key，
+剩下的 key 轮询、限速处理、重试和 SOCKS5 出口都交给网关。
 
-## Why
+沿用 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)、
+[autoclaw2api](https://github.com/ZFXing-lite/autoclaw2api)、
+[workbuddy2api](https://github.com/Sliverkiss/workbuddy2api) 的成熟模式：
+单二进制 + 一个 YAML 配置，无数据库，零运行时依赖。
 
-The Atria API rate-limits per account (`x-rpm-limit` / `x-rpm-remaining`,
-`Retry-After` on 429) and accepts three interfaces on one base URL. This
-gateway:
+## 为什么需要
 
-- rotates requests across multiple keys so one account's limit does not stop
-  your clients,
-- reads the documented rate-limit headers and sits a key out for the rest of
-  the minute window instead of hammering it into a 429,
-- retries retryable failures (429/5xx/transport) on another key, but never
-  rotates a 400-class client error, and never rotates once a stream has
-  started,
-- can send all upstream traffic through a pool of SOCKS5 proxies.
+Atria API 按账户限速（响应头 `x-rpm-limit` / `x-rpm-remaining`，429 时带
+`Retry-After`），三种接口共用同一个 base URL。本网关：
 
-## Quick start
+- 在多个 key 之间轮询，一个账户的限额用尽不会让你的客户端停摆；
+- 读取文档里的限速头，让 key 在本分钟窗口内主动休息，而不是撞 429；
+- 可重试的失败（429 / 5xx / 传输错误）自动换 key 重试，但 400 类客户端错误
+  原样回传、流式开始后绝不换号；
+- 可让全部上游流量走 SOCKS5 代理池。
+
+## 快速开始
 
 ```bash
 git clone https://github.com/ZFXing-lite/atria2api
 cd atria2api
 cp config.example.yaml config.yaml
-# edit config.yaml: put your atr_ keys under upstream.keys
+# 编辑 config.yaml，在 upstream.keys 填入你的 atr_ key
 go run ./cmd/server -c config.yaml
 ```
 
-Or with Docker:
+或用 Docker：
 
 ```bash
 docker build -t atria2api .
 docker run -p 8318:8318 -v "$PWD/config.yaml:/app/config.yaml:ro" atria2api
 ```
 
-Then point a client at the gateway (all three interfaces share the same URL):
+然后把客户端指向网关（三种接口同一个地址）：
 
 ```bash
 export OPENAI_API_KEY=gw-change-me-1
@@ -52,32 +49,31 @@ curl -X POST http://127.0.0.1:8318/v1/chat/completions \
   -d '{"model":"Atria-Dawn-Preview","messages":[{"role":"user","content":"hi"}]}'
 ```
 
-| Client | Base URL | Interface |
+| 客户端 | Base URL | 接口 |
 | --- | --- | --- |
 | OpenAI SDK / curl | `http://host:8318/v1` | `/v1/chat/completions` |
-| Anthropic SDK / Claude Code | `http://host:8318` | `/v1/messages` (`x-api-key`) |
+| Anthropic SDK / Claude Code | `http://host:8318` | `/v1/messages`（`x-api-key`） |
 | Codex / Qoder | `http://host:8318/v1` | `/v1/responses` |
 
-`GET /v1/models` returns the fixed `Atria-Dawn-Preview` entry.
+`GET /v1/models` 返回固定的 `Atria-Dawn-Preview` 条目。
 
-## Configuration
+## 配置
 
-Everything lives in `config.yaml` (env overrides: `ATRIA2API_KEYS`,
-`ATRIA2API_API_KEYS`, `ATRIA2API_PROXIES`, `ATRIA2API_BASE_URL`,
-`ATRIA2API_PORT`, ...). The file is hot-reloaded on change.
+全部配置在 `config.yaml` 里（环境变量覆盖：`ATRIA2API_KEYS`、`ATRIA2API_API_KEYS`、
+`ATRIA2API_PROXIES`、`ATRIA2API_BASE_URL`、`ATRIA2API_PORT`……）。配置文件变更会热重载。
 
 ```yaml
 port: 8318
-api-keys: ["gw-change-me-1"]        # keys clients use on THIS gateway
+api-keys: ["gw-change-me-1"]        # 客户端访问本网关用的 key
 
 upstream:
   base-url: "https://api.atria-asi.ai"
   default-model: "Atria-Dawn-Preview"
-  force-model: true                  # rewrite request "model" to default-model
+  force-model: true                  # 把请求体的 model 改写为 default-model
   keys:
     - key: "atr_xxx"
-      weight: 1                      # weighted round-robin
-      proxy: ""                      # optional per-key socks5:// override, or "none"
+      weight: 1                      # 加权轮询的权重
+      proxy: ""                      # 可选：该 key 专用 socks5:// 代理，或 "none" 直连
     - key: "atr_yyy"
 
 proxy:
@@ -88,48 +84,45 @@ proxy:
     - url: "socks5://user:pass@1.2.3.4:1080"
 
 rate-limit:
-  respect-header: true               # parse x-rpm-* / Retry-After
-  min-rpm-reserve: 1                 # skip a key with fewer remaining requests
-  cooldown-429: 60s                  # used when upstream sends no Retry-After
+  respect-header: true               # 解析 x-rpm-* / Retry-After
+  min-rpm-reserve: 1                 # 剩余次数低于此值的 key 跳过
+  cooldown-429: 60s                  # 上游没给 Retry-After 时用
   cooldown-5xx: 30s
-  err-threshold: 3                   # consecutive errors -> cooldown
+  err-threshold: 3                   # 连续错误达到阈值后冷却
   err-cooldown: 10m
-  disable-on-401: true               # invalid/revoked key is taken out for good
-  max-retries: 3                     # cross-key retries
+  disable-on-401: true               # 无效/已吊销的 key 直接永久停用
+  max-retries: 3                     # 单请求跨 key 重试次数
   retry-on: [429, 500, 502, 503, 504]
-  backoff: 1s                        # exponential, +/-25% jitter
+  backoff: 1s                        # 退避基数，指数增长 ±25% 抖动
 ```
 
-## Key pool behaviour
+## key 池行为
 
-- **Selection**: candidates are shuffled, sorted by an effective weight (config
-  weight damped by observed remaining RPM), truncated to the top 5 and picked
-  weighted-randomly, with an LRU tie-break. All-cooled pools fall back to the
-  key that recovers soonest.
-- **Cooldowns** are OR-gated over a single expiry timestamp: a repeated 429
-  while cooling never stacks penalties. 429 honours `Retry-After` (capped at
-  10m), 5xx uses `cooldown-5xx`, and consecutive failures open a circuit
-  breaker with bounded exponential backoff (10m, 20m, 40m ... capped at 6h).
-- **401** disables the key permanently (per the docs, that key is invalid or
-  revoked) until you re-enable it through the management API or a restart.
-- **Transport failures** (proxy down, timeouts) degrade a key out of rotation
-  for `err-cooldown` without blaming the key itself.
-- **Persistence**: pool state and usage counters are written atomically
-  (`state.json`, tmp + rename, 0600) every few seconds and restored on start.
+- **选号**：先洗牌，按有效权重（配置权重按观测到的剩余 RPM 衰减）排序，截取 top 5
+  后加权随机，权重相同时用 LRU 打破平局。全部冷却中时兜底选"最快恢复"的那个。
+- **冷却**用或门汇总到一个到期时间戳：冷却期间再次撞 429 不会叠加惩罚。429 认
+  `Retry-After`（封顶 10m），5xx 用 `cooldown-5xx`，连续错误触发熔断，有界指数退避
+  （10m、20m、40m……封顶 6h）。
+- **401** 永久停用该 key（按文档，401 表示 key 无效或已吊销），可通过管理 API 或
+  重启重新启用。
+- **传输层失败**（代理挂了、超时）只把 key 临时降级出池 `err-cooldown`，不记在
+  key 账上。
+- **持久化**：池状态与用量计数原子写入 `state.json`（tmp + rename，0600），每隔
+  几秒合并落盘，重启自动恢复。
 
-## Endpoints
+## 接口
 
-| Path | Description |
+| 路径 | 说明 |
 | --- | --- |
 | `POST /v1/chat/completions` | OpenAI Chat Completions |
-| `POST /v1/messages` | Anthropic Messages (`x-api-key`) |
+| `POST /v1/messages` | Anthropic Messages（`x-api-key`） |
 | `POST /v1/responses` | OpenAI Responses |
-| `GET /v1/models` | Fixed model catalog |
-| `GET /healthz` | Liveness (503 when no key is usable) |
-| `GET /status` | Masked pool + usage snapshot |
-| `*/v0/management/*` | Ops API (disabled unless `remote-management.secret-key` set) |
+| `GET /v1/models` | 固定模型目录 |
+| `GET /healthz` | 存活探针（无可用 key 时 503） |
+| `GET /status` | 脱敏的池状态与用量快照 |
+| `*/v0/management/*` | 运维 API（未设 `remote-management.secret-key` 时返回 404） |
 
-Management API (loopback-only by default):
+管理 API（默认仅允许回环访问）：
 
 ```bash
 curl -H "Authorization: Bearer $MGMT_KEY" http://127.0.0.1:8318/v0/management/keys
@@ -139,35 +132,31 @@ curl -X POST -H "Authorization: Bearer $MGMT_KEY" \
   http://127.0.0.1:8318/v0/management/keys/<id>/enable
 ```
 
-Keys are never logged or returned in the management API — only a stable,
-masked hash id (`status.json` style: `atr_****ey`).
+key 永远不会出现在日志或管理 API 里，只有一个稳定的掩码哈希 id。
 
-## Streaming
+## 流式
 
-SSE responses are streamed straight through with per-chunk flushing
-(`X-Accel-Buffering: no` so nginx does not buffer them) and SSE comment
-keepalives while waiting for the first token. The response headers are only
-committed after the first upstream chunk, so a pre-first-byte upstream failure
-can still rotate to another key; a failure mid-stream is injected as an SSE
-error event instead of cutting the connection.
+SSE 响应逐块透传并按块 flush（带 `X-Accel-Buffering: no`，nginx 不会缓冲），
+等首 token 期间发送 SSE 注释心跳。响应头只在收到上游第一个块之后才提交，
+所以"首字节前"的上游失败仍能换 key 重试；流式过程中的失败降级为 SSE error
+事件，而不是掐断连接。
 
-## Development
+## 开发
 
 ```bash
-go test ./...          # unit + end-to-end tests against a mock upstream
+go test ./...          # 单元测试 + 对 mock 上游的端到端测试
 go build -ldflags="-s -w" -o atria2api ./cmd/server
 ```
 
-## Notes and limits
+## 注意事项与限制
 
-- Atria's rate limit is per **account** and shared by every key under it, so
-  rotation helps when your keys come from different accounts; it cannot raise a
-  single account's RPM.
-- `Atria-Dawn-Preview` is text-only (256K context); the gateway forwards
-  request bodies as-is and does not transcode multimodal input.
-- Output-length caps (`max_completion_tokens` / `max_tokens` /
-  `max_output_tokens`, 1-65536) are enforced upstream.
+- Atria 的限速是**账户级**的、名下所有 key 共享，所以只有当你的 key 来自不同账户
+  时轮询才能真正分散限速；它抬不动单个账户的 RPM。
+- `Atria-Dawn-Preview` 是纯文本模型（256K 上下文）；网关原样转发请求体，不做
+  多模态转码。
+- 输出长度上限（`max_completion_tokens` / `max_tokens` / `max_output_tokens`，
+  1–65536）由上游强制执行。
 
-## License
+## 许可
 
-MIT.
+MIT。
