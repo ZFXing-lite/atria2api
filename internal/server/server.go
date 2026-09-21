@@ -14,22 +14,29 @@ import (
 	"github.com/ZFXing-lite/atria2api/internal/config"
 	"github.com/ZFXing-lite/atria2api/internal/keypool"
 	"github.com/ZFXing-lite/atria2api/internal/metrics"
+	"github.com/ZFXing-lite/atria2api/internal/proxypool"
 	"github.com/ZFXing-lite/atria2api/internal/relay"
 )
 
 // Server is the gateway HTTP front-end.
 type Server struct {
-	cfg     atomic.Pointer[config.Config]
-	relayer *relay.Relayer
-	pool    *keypool.Pool
-	metrics *metrics.Recorder
-	mgmtOn  atomic.Bool
-	log     *slog.Logger
-	started time.Time
+	cfg        atomic.Pointer[config.Config]
+	relayer    *relay.Relayer
+	pool       *keypool.Pool
+	proxies    *proxypool.Pool
+	metrics    *metrics.Recorder
+	stats      *Stats
+	mgmtOn     atomic.Bool
+	log        *slog.Logger
+	started    time.Time
+	configPath string
 }
 
-func New(cfg *config.Config, relayer *relay.Relayer, pool *keypool.Pool, rec *metrics.Recorder) *Server {
-	s := &Server{relayer: relayer, pool: pool, metrics: rec, log: slog.With("component", "server"), started: time.Now()}
+func New(cfg *config.Config, relayer *relay.Relayer, pool *keypool.Pool,
+	proxies *proxypool.Pool, rec *metrics.Recorder, configPath string) *Server {
+	s := &Server{relayer: relayer, pool: pool, proxies: proxies, metrics: rec,
+		stats: NewStats(), configPath: configPath,
+		log: slog.With("component", "server"), started: time.Now()}
 	s.cfg.Store(cfg)
 	s.mgmtOn.Store(cfg.Management.SecretKey != "")
 	return s
@@ -138,8 +145,11 @@ func (s *Server) notFound(w http.ResponseWriter, r *http.Request) {
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		cfg := s.cfg.Load()
-		// Public endpoints.
-		if r.URL.Path == "/healthz" || r.URL.Path == "/status" {
+		// Public endpoints, plus the management group, which carries its own
+		// secret-key auth and must stay reachable even when downstream
+		// api-keys are configured.
+		if r.URL.Path == "/healthz" || r.URL.Path == "/status" ||
+			strings.HasPrefix(r.URL.Path, "/v0/management") {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -176,8 +186,14 @@ func extractToken(r *http.Request) string {
 func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
+		s.stats.Begin(r.URL.Path)
 		rw := &statusWriter{ResponseWriter: w, status: 200}
+		errMsg := ""
 		next.ServeHTTP(rw, r)
+		if rw.status >= 400 {
+			errMsg = truncateMsg(rw.bodySnippet())
+		}
+		s.stats.End(r.URL.Path, rw.status, time.Since(start), errMsg)
 		s.log.Info("http", "method", r.Method, "path", r.URL.Path,
 			"status", rw.status, "bytes", rw.bytes,
 			"ip", clientIP(r), "took", time.Since(start).Round(time.Millisecond))
@@ -202,6 +218,8 @@ type statusWriter struct {
 	http.ResponseWriter
 	status int
 	bytes  int
+	// errBuf keeps the beginning of an error response for the panel.
+	errBuf []byte
 }
 
 func (s *statusWriter) WriteHeader(code int) {
@@ -212,7 +230,21 @@ func (s *statusWriter) WriteHeader(code int) {
 func (s *statusWriter) Write(p []byte) (int, error) {
 	n, err := s.ResponseWriter.Write(p)
 	s.bytes += n
+	if s.status >= 400 && len(s.errBuf) < 512 {
+		s.errBuf = append(s.errBuf, p[:min(n, 512-len(s.errBuf))]...)
+	}
 	return n, err
+}
+
+func (s *statusWriter) bodySnippet() string {
+	return string(s.errBuf)
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // --- helpers --------------------------------------------------------------

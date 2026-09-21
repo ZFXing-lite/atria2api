@@ -515,6 +515,79 @@ func (p *Pool) Enable(id string) bool {
 	return true
 }
 
+// --- runtime key management ----------------------------------------------
+
+// AddKey registers a key at runtime, or updates its weight/proxy when the id
+// already exists. Returns the entry id. Existing cooldowns/counts are kept.
+func (p *Pool) AddKey(key string, weight int, proxy string) string {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return ""
+	}
+	if weight <= 0 {
+		weight = 1
+	}
+	id := idOf(key)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if e, ok := p.byID[id]; ok {
+		e.Weight = weight
+		e.Proxy = strings.TrimSpace(proxy)
+		return id
+	}
+	p.byID[id] = &Entry{ID: id, Key: key, Weight: weight, Proxy: strings.TrimSpace(proxy)}
+	p.order = append(p.order, id)
+	p.dirty.Store(true)
+	return id
+}
+
+// RemoveKey drops a key by its (masked) id. In-flight requests holding a lease
+// keep working; nothing new is routed to it.
+func (p *Pool) RemoveKey(id string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if _, ok := p.byID[id]; !ok {
+		return false
+	}
+	delete(p.byID, id)
+	for i, x := range p.order {
+		if x == id {
+			p.order = append(p.order[:i], p.order[i+1:]...)
+			break
+		}
+	}
+	p.dirty.Store(true)
+	return true
+}
+
+// SyncKeys reconciles the pool with a fresh key list (from config reload):
+// new keys are added, missing keys removed, weights/proxies updated. State of
+// keys that survive is untouched.
+func (p *Pool) SyncKeys(keys []UpstreamKey) {
+	want := map[string]bool{}
+	for _, k := range keys {
+		k.Key = strings.TrimSpace(k.Key)
+		if k.Key == "" {
+			continue
+		}
+		want[idOf(k.Key)] = true
+		p.AddKey(k.Key, k.Weight, k.Proxy)
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for id := range p.byID {
+		if !want[id] {
+			delete(p.byID, id)
+		}
+	}
+	p.order = p.order[:0]
+	for id := range p.byID {
+		p.order = append(p.order, id)
+	}
+	sort.Strings(p.order)
+	p.dirty.Store(true)
+}
+
 // --- persistence ---------------------------------------------------------
 
 type snapshotEntry struct {

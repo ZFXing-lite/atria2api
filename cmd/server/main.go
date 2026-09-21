@@ -80,11 +80,13 @@ func main() {
 		}
 	})
 
-	srv := server.New(cfg, relayer, pool, rec)
+	srv := server.New(cfg, relayer, pool, proxies, rec, cfgPath)
 
-	// Hot reload: settings, relayer config and routes follow config changes.
+	// Hot reload: settings, relayer config, routes and the key list all follow
+	// config changes (the management panel writes config.yaml too).
 	watcher := config.NewWatcher(cfgPath, func(newCfg *config.Config) {
 		pool.SetSettings(toSettings(newCfg))
+		pool.SyncKeys(toPoolKeys(newCfg))
 		relayer.Update(relay.Config{
 			BaseURL:        newCfg.Upstream.BaseURL,
 			DefaultModel:   newCfg.Upstream.DefaultModel,
@@ -95,8 +97,8 @@ func main() {
 			Keepalive:      20 * time.Second,
 		})
 		srv.Update(newCfg)
-		if len(newCfg.Upstream.Keys) != len(cfg.Upstream.Keys) || countProxies(newCfg) != countProxies(cfg) {
-			slog.Warn("upstream keys / proxy list changed; restart to apply")
+		if countProxies(newCfg) != countProxies(cfg) {
+			slog.Warn("proxy list changed; restart to apply")
 		}
 		cfg = newCfg
 	})

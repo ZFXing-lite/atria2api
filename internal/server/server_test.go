@@ -30,7 +30,7 @@ func testServer(t *testing.T, apiKeys ...string) (*Server, *keypool.Pool) {
 
 	cfg := &config.Config{Host: "", Port: 8318, APIKeys: apiKeys}
 	cfg.Upstream.DefaultModel = "Atria-Dawn-Preview"
-	return New(cfg, r, pool, metrics.New("")), pool
+	return New(cfg, r, pool, nil, metrics.New(""), "config.yaml"), pool
 }
 
 func do(t *testing.T, s *Server, method, path, key string) *httptest.ResponseRecorder {

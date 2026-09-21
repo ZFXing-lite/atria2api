@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -118,6 +119,12 @@ func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	return d.Set(s)
+}
+
+// MarshalYAML emits the duration as a human string ("1m", "10s") so a saved
+// config round-trips through UnmarshalYAML.
+func (d Duration) MarshalYAML() (interface{}, error) {
+	return time.Duration(d).String(), nil
 }
 
 func (d Duration) String() string { return time.Duration(d).String() }
@@ -377,6 +384,110 @@ func splitList(v string) []string {
 		}
 	}
 	return out
+}
+
+// --- runtime mutation (management API) -----------------------------------
+
+// UpstreamKeyID returns the stable id used by the pool for a raw key value.
+func UpstreamKeyID(key string) string {
+	var h uint64 = 1469598103934665603
+	for i := 0; i < len(key); i++ {
+		h ^= uint64(key[i])
+		h *= 1099511628211
+	}
+	return strconv.FormatUint(h, 16)
+}
+
+// AddUpstreamKey adds an Atria key (deduped); returns its id.
+func (c *Config) AddUpstreamKey(key string, weight int, proxy string) string {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return ""
+	}
+	if weight <= 0 {
+		weight = 1
+	}
+	for _, k := range c.Upstream.Keys {
+		if strings.TrimSpace(k.Key) == key {
+			k.Weight = weight
+			k.Proxy = strings.TrimSpace(proxy)
+			return UpstreamKeyID(key)
+		}
+	}
+	c.Upstream.Keys = append(c.Upstream.Keys, UpstreamKey{
+		Key: key, Weight: weight, Proxy: strings.TrimSpace(proxy),
+	})
+	return UpstreamKeyID(key)
+}
+
+// RemoveUpstreamKey removes a key by its id (as returned by UpstreamKeyID).
+func (c *Config) RemoveUpstreamKey(id string) bool {
+	for i, k := range c.Upstream.Keys {
+		if UpstreamKeyID(k.Key) == id {
+			c.Upstream.Keys = append(c.Upstream.Keys[:i], c.Upstream.Keys[i+1:]...)
+			return true
+		}
+	}
+	return false
+}
+
+// AddAPIKey adds a downstream (client) key, deduped.
+func (c *Config) AddAPIKey(key string) bool {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return false
+	}
+	for _, k := range c.APIKeys {
+		if strings.TrimSpace(k) == key {
+			return false
+		}
+	}
+	c.APIKeys = append(c.APIKeys, key)
+	return true
+}
+
+// RemoveAPIKey removes a downstream key by its id.
+func (c *Config) RemoveAPIKey(id string) bool {
+	for i, k := range c.APIKeys {
+		if UpstreamKeyID(strings.TrimSpace(k)) == id {
+			c.APIKeys = append(c.APIKeys[:i], c.APIKeys[i+1:]...)
+			return true
+		}
+	}
+	return false
+}
+
+// APIKeysMasked returns downstream keys with their ids, never the raw value.
+func (c *Config) APIKeysMasked() []map[string]string {
+	out := make([]map[string]string, 0, len(c.APIKeys))
+	for _, k := range c.APIKeys {
+		k = strings.TrimSpace(k)
+		if k == "" {
+			continue
+		}
+		out = append(out, map[string]string{"id": UpstreamKeyID(k), "key": mask(k)})
+	}
+	return out
+}
+
+// Save writes the config back to path atomically (tmp + rename, 0600).
+// Comments in the original file are not preserved: values are.
+func (c *Config) Save(path string) error {
+	if path == "" {
+		return fmt.Errorf("no config path")
+	}
+	b, err := yaml.Marshal(c)
+	if err != nil {
+		return fmt.Errorf("marshal config: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 // --- hot reload ----------------------------------------------------------

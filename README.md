@@ -120,7 +120,29 @@ rate-limit:
 | `GET /v1/models` | 固定模型目录 |
 | `GET /healthz` | 存活探针（无可用 key 时 503） |
 | `GET /status` | 脱敏的池状态与用量快照 |
+| `*/v0/management/panel` | Web 管理面板 |
 | `*/v0/management/*` | 运维 API（未设 `remote-management.secret-key` 时返回 404） |
+
+## 管理面板
+
+设置 `remote-management.secret-key` 后，浏览器打开：
+
+```
+http://127.0.0.1:8318/v0/management/panel
+```
+
+面板是零依赖单文件页面，每 2.5 秒自动刷新，支持：
+
+- **概览**：监听端口、TLS、pprof 端口、上游地址、默认模型、可用 key 数、代理数、鉴权状态
+- **上游 key 池**：实时查看每个 key 的状态/冷却原因/到期时间/RPM 余量/进行中/成功失败计数，
+  一键禁用、启用、删除，表单实时添加新 key（权重 + 代理覆盖）
+- **下游调用 key**：实时增删客户端访问本网关用的 key，**删除即刻失效**
+- **接口调用统计**：每个路径的请求数、错误数、进行中、最近状态码与最近错误
+- **代理池**：每个 SOCKS5 节点的健康/失败/成功计数（节点列表仍在 config.yaml 维护）
+- **Token 用量**：按 key 与按模型汇总
+
+所有写操作立即生效，并原子回写 config.yaml（注意：回写会丢失文件里的注释）。
+管理 API 默认只允许本机访问，需要远程访问设 `remote-management.allow-remote: true`。
 
 管理 API（默认仅允许回环访问）：
 
