@@ -339,3 +339,27 @@ type promptCapture struct {
 func (p *promptCapture) hook(keyID string, kind Kind, model string, pr, co int) {
 	p.prompt, p.completion = pr, co
 }
+
+// TestParseUsageCrossFormat makes sure usage is not silently lost when an
+// endpoint answers with the other API's field names.
+func TestParseUsageCrossFormat(t *testing.T) {
+	chat := []byte(`{"model":"Atria-Dawn-Preview","usage":{"prompt_tokens":12,"completion_tokens":7}}`)
+	anth := []byte(`{"model":"Atria-Dawn-Preview","usage":{"input_tokens":12,"output_tokens":7}}`)
+
+	if u := parseUsage(KindChat, chat); !u.ok || u.prompt != 12 || u.completion != 7 {
+		t.Fatalf("chat/chat: %+v", u)
+	}
+	// A messages request answered with a chat-style body must still count.
+	if u := parseUsage(KindMessages, chat); !u.ok || u.prompt != 12 || u.completion != 7 {
+		t.Fatalf("messages/chat: %+v", u)
+	}
+	if u := parseUsage(KindMessages, anth); !u.ok || u.prompt != 12 || u.completion != 7 {
+		t.Fatalf("messages/anthropic: %+v", u)
+	}
+	if u := parseUsage(KindChat, anth); !u.ok || u.prompt != 12 || u.completion != 7 {
+		t.Fatalf("chat/anthropic: %+v", u)
+	}
+	if u := parseUsage(KindChat, []byte(`{"nope":1}`)); u.ok {
+		t.Fatalf("empty usage must not parse: %+v", u)
+	}
+}

@@ -478,37 +478,31 @@ type usage struct {
 
 // parseUsage finds the usage object in body. For non-streaming responses the
 // object sits at top level; for streams it is inside the last data event, so
-// the caller passes the captured stream tail.
+// the caller passes the captured stream tail. Each kind tries its native
+// field names first and falls back to the other shape: an upstream may answer
+// a messages request with a chat-style body, and losing the counters silently
+// is worse than crediting them under a different label.
 func parseUsage(kind Kind, body []byte) usage {
 	if len(body) == 0 {
 		return usage{}
 	}
-	var u usage
-	switch kind {
-	case KindChat:
-		var v struct {
-			Model string `json:"model"`
-			Usage *struct {
-				PromptTokens     int `json:"prompt_tokens"`
-				CompletionTokens int `json:"completion_tokens"`
-			} `json:"usage"`
-		}
-		if err := json.Unmarshal(body, &v); err == nil && v.Usage != nil {
-			return usage{ok: true, model: v.Model, prompt: v.Usage.PromptTokens, completion: v.Usage.CompletionTokens}
-		}
-	case KindMessages, KindResponses:
-		var v struct {
-			Model string `json:"model"`
-			Usage *struct {
-				InputTokens  int `json:"input_tokens"`
-				OutputTokens int `json:"output_tokens"`
-			} `json:"usage"`
-		}
-		if err := json.Unmarshal(body, &v); err == nil && v.Usage != nil {
-			return usage{ok: true, model: v.Model, prompt: v.Usage.InputTokens, completion: v.Usage.OutputTokens}
-		}
+	var chat struct {
+		Model string `json:"model"`
+		Usage *struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+			InputTokens      int `json:"input_tokens"`
+			OutputTokens     int `json:"output_tokens"`
+		} `json:"usage"`
 	}
-	return u
+	if err := json.Unmarshal(body, &chat); err != nil || chat.Usage == nil {
+		return usage{}
+	}
+	c := chat.Usage
+	if c.InputTokens > 0 || c.OutputTokens > 0 {
+		return usage{ok: true, model: chat.Model, prompt: c.InputTokens, completion: c.OutputTokens}
+	}
+	return usage{ok: true, model: chat.Model, prompt: c.PromptTokens, completion: c.CompletionTokens}
 }
 
 // findUsageInStream scans SSE data lines for the last usage payload. If the
