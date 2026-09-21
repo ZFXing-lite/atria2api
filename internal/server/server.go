@@ -1,0 +1,238 @@
+// Package server wires the HTTP front-end: routes for the three Atria
+// interfaces, downstream api-key authentication, CORS, request logging,
+// health endpoints and a small management API.
+package server
+
+import (
+	"encoding/json"
+	"log/slog"
+	"net/http"
+	"strings"
+	"sync/atomic"
+	"time"
+
+	"github.com/ZFXing-lite/atria2api/internal/config"
+	"github.com/ZFXing-lite/atria2api/internal/keypool"
+	"github.com/ZFXing-lite/atria2api/internal/metrics"
+	"github.com/ZFXing-lite/atria2api/internal/relay"
+)
+
+// Server is the gateway HTTP front-end.
+type Server struct {
+	cfg     atomic.Pointer[config.Config]
+	relayer *relay.Relayer
+	pool    *keypool.Pool
+	metrics *metrics.Recorder
+	mgmtOn  atomic.Bool
+	log     *slog.Logger
+	started time.Time
+}
+
+func New(cfg *config.Config, relayer *relay.Relayer, pool *keypool.Pool, rec *metrics.Recorder) *Server {
+	s := &Server{relayer: relayer, pool: pool, metrics: rec, log: slog.With("component", "server"), started: time.Now()}
+	s.cfg.Store(cfg)
+	s.mgmtOn.Store(cfg.Management.SecretKey != "")
+	return s
+}
+
+func (s *Server) Update(cfg *config.Config) {
+	s.cfg.Store(cfg)
+	s.mgmtOn.Store(strings.TrimSpace(cfg.Management.SecretKey) != "")
+}
+
+// Handler returns the root mux. It is rebuilt on config hot-reload by callers
+// that swap the mux via atomic.Pointer (see cmd/server/main.go).
+func (s *Server) Handler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/chat/completions", s.relay(relay.KindChat))
+	mux.HandleFunc("/v1/messages", s.relay(relay.KindMessages))
+	mux.HandleFunc("/v1/messages/count_tokens", s.relay(relay.KindMessages))
+	mux.HandleFunc("/v1/responses", s.relay(relay.KindResponses))
+	mux.HandleFunc("/v1/models", s.models)
+	mux.HandleFunc("/healthz", s.healthz)
+	mux.HandleFunc("/status", s.status)
+	mux.HandleFunc("/v0/management/", s.management)
+	mux.HandleFunc("/", s.notFound)
+
+	var h http.Handler = mux
+	h = s.authMiddleware(h)
+	h = s.loggingMiddleware(h)
+	h = corsMiddleware(h)
+	return h
+}
+
+// relay returns a handler for one Atria interface.
+func (s *Server) relay(kind relay.Kind) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost && r.Method != http.MethodPut {
+			writeJSON(w, http.StatusMethodNotAllowed, errBody("method not allowed", "method_not_allowed"))
+			return
+		}
+		if kind == relay.KindMessages && strings.HasSuffix(r.URL.Path, "/count_tokens") {
+			// count_tokens is not documented on Atria; answer locally.
+			writeJSON(w, http.StatusOK, map[string]any{"input_tokens": 0})
+			return
+		}
+		s.relayer.Handle(w, r, kind)
+	}
+}
+
+// models returns the fixed Atria catalog in OpenAI and Anthropic shapes.
+func (s *Server) models(w http.ResponseWriter, r *http.Request) {
+	model := s.cfg.Load().Upstream.DefaultModel
+	if strings.Contains(strings.ToLower(r.Header.Get("anthropic-version")), "2023") ||
+		strings.Contains(strings.ToLower(r.UserAgent()), "claude") {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"data": []map[string]any{{
+				"type": "model", "id": model, "display_name": model,
+				"created_at": s.started.Unix(),
+			}},
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"object": "list",
+		"data": []map[string]any{{
+			"id": model, "object": "model", "created": s.started.Unix(),
+			"owned_by":       "atria",
+			"context_length": 256000,
+		}},
+	})
+}
+
+// healthz reports gateway liveness: 200 while at least one upstream key is
+// not permanently disabled, 503 otherwise.
+func (s *Server) healthz(w http.ResponseWriter, r *http.Request) {
+	total, healthy := s.pool.Summary()
+	if healthy == 0 {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"status": "unhealthy", "keys": total, "healthy": healthy,
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": "ok", "keys": total, "healthy": healthy,
+		"uptime_seconds": time.Since(s.started).Seconds(),
+	})
+}
+
+// status is a masked view of the pool for operators.
+func (s *Server) status(w http.ResponseWriter, r *http.Request) {
+	resp := map[string]any{
+		"keys": s.pool.Status(),
+	}
+	if rec := s.metrics; rec != nil {
+		resp["usage"] = rec.Snapshot()
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) notFound(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusNotFound, errBody(
+		"unknown path; supported: /v1/chat/completions, /v1/messages, /v1/responses, /v1/models",
+		"not_found"))
+}
+
+// --- middleware -----------------------------------------------------------
+
+func (s *Server) authMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cfg := s.cfg.Load()
+		// Public endpoints.
+		if r.URL.Path == "/healthz" || r.URL.Path == "/status" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if !cfg.AuthRequired() {
+			next.ServeHTTP(w, r)
+			return
+		}
+		token := extractToken(r)
+		if token == "" || !cfg.IsAuthorized(token) {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="atria2api"`)
+			writeJSON(w, http.StatusUnauthorized, errBody(
+				"missing or invalid api key", "invalid_api_key"))
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func extractToken(r *http.Request) string {
+	if h := r.Header.Get("Authorization"); h != "" {
+		if t := strings.TrimSpace(strings.TrimPrefix(h, "Bearer")); t != "" {
+			return t
+		}
+	}
+	if k := r.Header.Get("X-Api-Key"); k != "" {
+		return strings.TrimSpace(k)
+	}
+	if k := r.Header.Get("x-api-key"); k != "" {
+		return strings.TrimSpace(k)
+	}
+	return r.URL.Query().Get("key")
+}
+
+func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		rw := &statusWriter{ResponseWriter: w, status: 200}
+		next.ServeHTTP(rw, r)
+		s.log.Info("http", "method", r.Method, "path", r.URL.Path,
+			"status", rw.status, "bytes", rw.bytes,
+			"ip", clientIP(r), "took", time.Since(start).Round(time.Millisecond))
+	})
+}
+
+func corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("Access-Control-Allow-Origin", "*")
+		h.Set("Access-Control-Allow-Methods", "GET, POST, PUT, OPTIONS")
+		h.Set("Access-Control-Allow-Headers", "Authorization, Content-Type, x-api-key, anthropic-version, anthropic-beta, Accept")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+	bytes  int
+}
+
+func (s *statusWriter) WriteHeader(code int) {
+	s.status = code
+	s.ResponseWriter.WriteHeader(code)
+}
+
+func (s *statusWriter) Write(p []byte) (int, error) {
+	n, err := s.ResponseWriter.Write(p)
+	s.bytes += n
+	return n, err
+}
+
+// --- helpers --------------------------------------------------------------
+
+func clientIP(r *http.Request) string {
+	if ff := r.Header.Get("X-Forwarded-For"); ff != "" {
+		return strings.TrimSpace(strings.Split(ff, ",")[0])
+	}
+	return r.RemoteAddr
+}
+
+func errBody(msg, code string) map[string]any {
+	return map[string]any{"error": map[string]any{
+		"message": msg, "type": "atria2api_error", "code": code,
+	}}
+}
+
+func writeJSON(w http.ResponseWriter, code int, v any) {
+	b, _ := json.Marshal(v)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	_, _ = w.Write(b)
+}

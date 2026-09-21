@@ -1,0 +1,263 @@
+// Command atria2api runs the Atria API gateway.
+package main
+
+import (
+	"context"
+	"errors"
+	"flag"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"net/http/pprof"
+	"os"
+	"os/signal"
+	"strings"
+	"sync/atomic"
+	"syscall"
+	"time"
+
+	"github.com/ZFXing-lite/atria2api/internal/config"
+	"github.com/ZFXing-lite/atria2api/internal/keypool"
+	"github.com/ZFXing-lite/atria2api/internal/metrics"
+	"github.com/ZFXing-lite/atria2api/internal/proxypool"
+	"github.com/ZFXing-lite/atria2api/internal/relay"
+	"github.com/ZFXing-lite/atria2api/internal/server"
+)
+
+func main() {
+	var cfgPath string
+	flag.StringVar(&cfgPath, "c", "config.yaml", "config file path")
+	flag.Parse()
+	if v := strings.TrimSpace(os.Getenv("ATRIA2API_CONFIG")); v != "" {
+		cfgPath = v
+	}
+
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "config: %v\n", err)
+		os.Exit(2)
+	}
+	setupLogger(cfg)
+
+	slog.Info("atria2api starting",
+		"listen", cfg.ListenAddr(), "base-url", cfg.Upstream.BaseURL,
+		"keys", len(cfg.Upstream.Keys), "proxies", countProxies(cfg),
+		"model", cfg.Upstream.DefaultModel,
+		"auth-required", cfg.AuthRequired())
+	warnPlaceholders(cfg)
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	// Upstream key pool.
+	pool := keypool.New(toPoolKeys(cfg), toSettings(cfg), config.ResolvePath(cfg.Metrics.StateFile, "."))
+	if err := pool.Restore(); err != nil {
+		slog.Warn("restore pool state failed", "err", err)
+	}
+
+	// SOCKS5 proxy pool.
+	proxies := proxypool.New(toProxyEntries(cfg), cfg.Proxy.Policy, time.Duration(cfg.Proxy.FailCooldown))
+
+	// Usage metrics.
+	rec := metrics.New(config.ResolvePath(cfg.Metrics.StateFile, ".") + ".usage")
+	if cfg.Metrics.Enabled {
+		if err := rec.Restore(); err != nil {
+			slog.Warn("restore usage failed", "err", err)
+		}
+	}
+
+	relayer := relay.New(pool, proxies, relay.Config{
+		BaseURL:        cfg.Upstream.BaseURL,
+		DefaultModel:   cfg.Upstream.DefaultModel,
+		ForceModel:     cfg.Upstream.ForceModel,
+		Timeout:        time.Duration(cfg.Upstream.Timeout),
+		ConnectTimeout: time.Duration(cfg.Upstream.ConnectTimeout),
+		MaxRetries:     cfg.RateLimit.MaxRetries,
+		Keepalive:      20 * time.Second,
+	}, func(keyID string, kind relay.Kind, model string, prompt, completion int) {
+		if cfg.Metrics.Enabled {
+			rec.Record(keyID, model, prompt, completion)
+		}
+	})
+
+	srv := server.New(cfg, relayer, pool, rec)
+
+	// Hot reload: settings, relayer config and routes follow config changes.
+	watcher := config.NewWatcher(cfgPath, func(newCfg *config.Config) {
+		pool.SetSettings(toSettings(newCfg))
+		relayer.Update(relay.Config{
+			BaseURL:        newCfg.Upstream.BaseURL,
+			DefaultModel:   newCfg.Upstream.DefaultModel,
+			ForceModel:     newCfg.Upstream.ForceModel,
+			Timeout:        time.Duration(newCfg.Upstream.Timeout),
+			ConnectTimeout: time.Duration(newCfg.Upstream.ConnectTimeout),
+			MaxRetries:     newCfg.RateLimit.MaxRetries,
+			Keepalive:      20 * time.Second,
+		})
+		srv.Update(newCfg)
+		if len(newCfg.Upstream.Keys) != len(cfg.Upstream.Keys) || countProxies(newCfg) != countProxies(cfg) {
+			slog.Warn("upstream keys / proxy list changed; restart to apply")
+		}
+		cfg = newCfg
+	})
+
+	var handler atomic.Value
+	handler.Store(srv.Handler())
+	httpSrv := &http.Server{
+		Addr:              cfg.ListenAddr(),
+		Handler:           http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { handler.Load().(http.Handler).ServeHTTP(w, r) }),
+		ReadHeaderTimeout: 30 * time.Second,
+	}
+
+	go pool.FlushLoop(ctx, time.Duration(cfg.Metrics.FlushEvery))
+	go watcher.Run(ctx, cfg)
+	go proxyHealth(ctx, proxies, cfg)
+	if cfg.Metrics.Enabled {
+		go rec.FlushLoop(ctx, time.Duration(cfg.Metrics.FlushEvery))
+	}
+
+	if cfg.Metrics.Enabled {
+		// pprof on a separate localhost port, disabled by default.
+		go func() {
+			mux := http.NewServeMux()
+			mux.HandleFunc("/debug/pprof/", pprof.Index)
+			mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+			mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+			mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+			pp := &http.Server{Addr: "127.0.0.1:8319", Handler: mux}
+			go func() {
+				<-ctx.Done()
+				_ = pp.Shutdown(context.Background())
+			}()
+			if err := pp.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				slog.Warn("pprof server stopped", "err", err)
+			}
+		}()
+	}
+
+	serveErr := make(chan error, 1)
+	go func() {
+		slog.Info("listening", "addr", cfg.ListenAddr())
+		if cfg.TLS.Enable {
+			serveErr <- httpSrv.ListenAndServeTLS(cfg.TLS.Cert, cfg.TLS.Key)
+		} else {
+			serveErr <- httpSrv.ListenAndServe()
+		}
+	}()
+
+	select {
+	case <-ctx.Done():
+		slog.Info("shutdown signal received")
+	case err := <-serveErr:
+		slog.Error("server failed", "err", err)
+		stop()
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
+		slog.Error("graceful shutdown failed", "err", err)
+	}
+	slog.Info("atria2api stopped")
+}
+
+func setupLogger(cfg *config.Config) {
+	var level slog.Level
+	switch strings.ToLower(cfg.Log.Level) {
+	case "debug":
+		level = slog.LevelDebug
+	case "warn":
+		level = slog.LevelWarn
+	case "error":
+		level = slog.LevelError
+	default:
+		level = slog.LevelInfo
+	}
+	var h slog.Handler
+	if strings.ToLower(cfg.Log.Format) == "json" {
+		h = slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level})
+	} else {
+		h = slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level})
+	}
+	slog.SetDefault(slog.New(h))
+}
+
+func warnPlaceholders(cfg *config.Config) {
+	for _, k := range cfg.Upstream.Keys {
+		if isPlaceholder(k.Key) {
+			slog.Warn("upstream key looks like a placeholder; clients will get 401 until a real atr_ key is set",
+				"key", config.MaskKey(k.Key))
+		}
+	}
+}
+
+func isPlaceholder(k string) bool {
+	lk := strings.ToLower(k)
+	for _, p := range []string{"xxx", "your", "placeholder", "example", "change_me", "atr_"} {
+		if lk == p || strings.Contains(lk, p) && (p == "xxx" || strings.Contains(lk, "your") || strings.Contains(lk, "example")) {
+			return true
+		}
+	}
+	return false
+}
+
+func proxyHealth(ctx context.Context, p *proxypool.Pool, cfg *config.Config) {
+	if p == nil || p.Empty() {
+		return
+	}
+	every := time.Duration(cfg.Proxy.HealthEvery)
+	if every <= 0 {
+		return
+	}
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			p.HealthCheck(ctx, "api.atria-asi.ai:443")
+		}
+	}
+}
+
+func toPoolKeys(cfg *config.Config) []keypool.UpstreamKey {
+	out := make([]keypool.UpstreamKey, 0, len(cfg.Upstream.Keys))
+	for _, k := range cfg.Upstream.Keys {
+		out = append(out, keypool.UpstreamKey{Key: k.Key, Weight: k.Weight, Proxy: k.Proxy})
+	}
+	return out
+}
+
+func toSettings(cfg *config.Config) keypool.Settings {
+	return keypool.Settings{
+		MinRPMReserve: cfg.RateLimit.MinRPMReserve,
+		Cooldown429:   time.Duration(cfg.RateLimit.Cooldown429),
+		Cooldown5xx:   time.Duration(cfg.RateLimit.Cooldown5xx),
+		ErrThreshold:  cfg.RateLimit.ErrThreshold,
+		ErrCooldown:   time.Duration(cfg.RateLimit.ErrCooldown),
+		DisableOn401:  cfg.RateLimit.DisableOn401,
+		MaxRetries:    cfg.RateLimit.MaxRetries,
+		RetryOn:       cfg.RateLimit.RetryOn,
+		Backoff:       time.Duration(cfg.RateLimit.Backoff),
+	}
+}
+
+func toProxyEntries(cfg *config.Config) []struct {
+	URL    string
+	Weight int
+} {
+	out := make([]struct {
+		URL    string
+		Weight int
+	}, 0, len(cfg.Proxy.SOCKS5))
+	for _, e := range cfg.Proxy.SOCKS5 {
+		out = append(out, struct {
+			URL    string
+			Weight int
+		}{URL: e.URL, Weight: e.Weight})
+	}
+	return out
+}
+
+func countProxies(cfg *config.Config) int { return len(cfg.Proxy.SOCKS5) }

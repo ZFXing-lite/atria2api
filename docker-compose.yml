@@ -1,0 +1,19 @@
+services:
+  atria2api:
+    build: .
+    image: atria2api:latest
+    container_name: atria2api
+    restart: unless-stopped
+    ports:
+      - "8318:8318"
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - atria2api-state:/app
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8318/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  atria2api-state:
