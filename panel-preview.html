@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>atria2api 控制面板</title>
+<style>
+  :root {
+    --bg:#0b0e14; --panel:#141922; --panel-2:#1b2230; --border:#2a3344;
+    --text:#e7edf5; --dim:#93a0b4; --accent:#6ea8ff; --accent-2:#3d7dff;
+    --green:#3fb950; --red:#ff7b72; --amber:#e3b341; --code:#10151d;
+    --shadow:0 10px 30px rgba(0,0,0,.28);
+    --pad:16px; --radius:14px;
+  }
+  * { box-sizing:border-box; }
+  html, body { margin:0; background:var(--bg); color:var(--text); }
+  body {
+    font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+    padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+  }
+  button, input, select, textarea { font:inherit; color:inherit; }
+  header {
+    position:sticky; top:0; z-index:20;
+    display:flex; flex-wrap:wrap; align-items:center; gap:10px 14px;
+    padding:12px var(--pad);
+    background:rgba(11,14,20,.92); backdrop-filter:saturate(140%) blur(10px);
+    border-bottom:1px solid var(--border);
+  }
+  .brand { display:flex; align-items:center; gap:10px; min-width:0; }
+  .brand h1 { font-size:16px; margin:0; font-weight:650; letter-spacing:.2px; }
+  .brand .sub { color:var(--dim); font-size:12px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:42vw; }
+  .dot { width:9px; height:9px; border-radius:50%; background:var(--green); box-shadow:0 0 0 4px rgba(63,185,80,.15); flex:none; }
+  .dot.off { background:var(--red); box-shadow:0 0 0 4px rgba(255,123,114,.15); }
+  .sp { flex:1 1 8px; }
+  .tools { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+  .btn {
+    background:var(--panel-2); color:var(--text); border:1px solid var(--border);
+    border-radius:10px; padding:8px 12px; cursor:pointer; min-height:36px;
+  }
+  .btn:hover { border-color:var(--accent); }
+  .btn.primary { background:var(--accent-2); border-color:var(--accent-2); color:#fff; }
+  .btn.danger { border-color:transparent; background:rgba(255,123,114,.12); color:var(--red); }
+  .btn.sm { padding:6px 10px; min-height:32px; font-size:13px; }
+  main { width:min(1180px, 100%); margin:0 auto; padding:18px var(--pad) 72px; }
+  section {
+    background:var(--panel); border:1px solid var(--border); border-radius:var(--radius);
+    padding:16px; margin-bottom:16px; box-shadow:var(--shadow);
+  }
+  section h2 {
+    font-size:15px; margin:0 0 4px; font-weight:650; display:flex; align-items:center; gap:8px; flex-wrap:wrap;
+  }
+  .hint { color:var(--dim); font-size:12.5px; margin:0 0 12px; }
+  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px; margin-bottom:16px; }
+  .card { background:var(--panel); border:1px solid var(--border); border-radius:var(--radius); padding:12px 14px; min-width:0; }
+  .card .k { color:var(--dim); font-size:12px; margin-bottom:4px; }
+  .card .v { font-size:15px; font-weight:650; overflow-wrap:anywhere; }
+  .pill { display:inline-flex; align-items:center; padding:1px 8px; border-radius:99px; font-size:12px; border:1px solid var(--border); white-space:nowrap; }
+  .pill.ok { color:var(--green); border-color:rgba(63,185,80,.55); background:rgba(63,185,80,.08); }
+  .pill.bad { color:var(--red); border-color:rgba(255,123,114,.55); background:rgba(255,123,114,.08); }
+  .pill.warn { color:var(--amber); border-color:rgba(227,179,65,.55); background:rgba(227,179,65,.08); }
+  .pill.dim { color:var(--dim); }
+  .scroll { overflow-x:auto; -webkit-overflow-scrolling:touch; margin:0 -4px; padding:0 4px; }
+  table { width:100%; border-collapse:collapse; font-size:13px; min-width:640px; }
+  table.slim { min-width:0; }
+  th, td { padding:8px 8px; text-align:left; border-bottom:1px solid var(--border); vertical-align:middle; }
+  th { color:var(--dim); font-weight:550; white-space:nowrap; }
+  td { overflow-wrap:anywhere; }
+  tr:last-child td { border-bottom:none; }
+  .mono, code { font:12.5px/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+  .mono { background:var(--code); padding:2px 6px; border-radius:6px; }
+  form.row, .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:12px; }
+  input, select, textarea {
+    background:var(--bg); border:1px solid var(--border); border-radius:10px;
+    padding:9px 11px; outline:none; min-height:40px; width:100%;
+  }
+  input:focus, select:focus, textarea:focus { border-color:var(--accent); }
+  .grow { flex:1 1 220px; min-width:0; }
+  .narrow { flex:0 1 110px; }
+  textarea { min-height:120px; resize:vertical; }
+  label.chk { display:flex; align-items:center; gap:8px; color:var(--dim); min-height:40px; }
+  .muted { color:var(--dim); }
+  .err { color:var(--red); }
+  .right { text-align:right; }
+  .num { font-variant-numeric:tabular-nums; white-space:nowrap; }
+  .actions { display:flex; gap:6px; justify-content:flex-end; flex-wrap:wrap; }
+  .subhead { margin:16px 0 8px; font-size:13px; color:var(--dim); font-weight:650; }
+  #toast {
+    position:fixed; left:50%; bottom:max(18px, env(safe-area-inset-bottom));
+    transform:translateX(-50%); max-width:min(92vw, 480px);
+    background:var(--panel-2); border:1px solid var(--accent); color:var(--text);
+    padding:10px 16px; border-radius:12px; opacity:0; transition:opacity .2s;
+    pointer-events:none; z-index:99; text-align:center;
+  }
+  #toast.show { opacity:1; }
+  #toast.err { border-color:var(--red); }
+  #login {
+    position:fixed; inset:0; z-index:50; display:flex; align-items:center; justify-content:center;
+    padding:20px; background:
+      radial-gradient(900px 420px at 20% -10%, rgba(61,125,255,.22), transparent 60%),
+      var(--bg);
+  }
+  #login .box { width:min(420px, 100%); background:var(--panel); border:1px solid var(--border); border-radius:18px; padding:24px; box-shadow:var(--shadow); }
+  #login h2 { margin:0 0 6px; font-size:20px; }
+  #login p { color:var(--dim); font-size:13px; margin:0 0 16px; }
+  #login input { margin-bottom:12px; }
+  .foot { color:var(--dim); font-size:12px; text-align:center; }
+  .foot a { color:var(--dim); }
+  details { margin-top:12px; }
+  summary { cursor:pointer; color:var(--dim); }
+  @media (max-width: 720px) {
+    :root { --pad:12px; }
+    .brand .sub { display:none; }
+    .tools { width:100%; }
+    .tools .btn { flex:1 1 auto; }
+    table.hide-phone { display:none; }
+    .cards { grid-template-columns:1fr 1fr; }
+  }
+  @media (min-width: 721px) {
+    .phone-list { display:none; }
+  }
+  .kv { display:grid; gap:8px; }
+  .kv .item {
+    display:grid; grid-template-columns:88px 1fr; gap:8px; align-items:start;
+    padding:10px 0; border-bottom:1px solid var(--border); font-size:13px;
+  }
+  .kv .item:last-child { border-bottom:none; }
+  .kv .item b { color:var(--dim); font-weight:550; }
+</style>
+</head>
+<body>
+
+<div id="login">
+  <div class="box">
+    <h2>atria2api 控制面板</h2>
+    <p>输入部署时设置的面板密码。它只存在于当前浏览器会话，不能当作下游调用密钥，下游密钥也登不了这个面板。</p>
+    <input id="mgmtKey" type="password" placeholder="面板密码" autocomplete="current-password" onkeydown="if(event.key==='Enter')doLogin()">
+    <button class="btn primary" style="width:100%" onclick="doLogin()">登录</button>
+    <div id="loginErr" class="err" style="margin-top:10px;font-size:13px"></div>
+  </div>
+</div>
+
+<header>
+  <div class="brand">
+    <span class="dot" id="healthDot"></span>
+    <div>
+      <h1>atria2api 控制面板</h1>
+      <div class="sub mono" id="upstreamLbl"></div>
+    </div>
+  </div>
+  <span class="sp"></span>
+  <div class="tools">
+    <span class="muted" id="refreshLbl" style="font-size:12px"></span>
+    <button class="btn sm" id="autoBtn" onclick="toggleAuto()">自动刷新：开</button>
+    <button class="btn sm" onclick="refresh()">刷新</button>
+    <button class="btn sm" onclick="logout()">退出</button>
+  </div>
+</header>
+
+<main>
+  <div class="cards" id="overview"></div>
+
+  <section>
+    <h2>上游 Atria 密钥 <span class="pill dim" id="keysPill"></span></h2>
+    <p class="hint">这些密钥用来调用 Atria。列表里只显示哈希编号，不显示原文。同一账户下的密钥共享每分钟额度。</p>
+    <div class="scroll">
+      <table>
+        <thead><tr>
+          <th>编号</th><th>权重</th><th>状态</th><th>原因</th><th>恢复</th>
+          <th>每分钟余量</th><th>进行中</th><th>成功 / 失败</th>
+          <th>请求</th><th>输入</th><th>输出</th><th>合计</th><th class="right">操作</th>
+        </tr></thead>
+        <tbody id="keysBody"></tbody>
+      </table>
+    </div>
+    <form class="row" onsubmit="return addKey(event)">
+      <input id="newKey" class="grow" placeholder="atr_ 开头的上游密钥" autocomplete="off">
+      <input id="newWeight" class="narrow" type="number" value="1" min="1" title="权重" inputmode="numeric">
+      <input id="newProxy" class="grow" placeholder="单独代理，可留空。填 socks5://地址:端口，或 none 表示直连">
+      <button class="btn primary" type="submit">添加上游密钥</button>
+    </form>
+    <details id="bulkBox">
+      <summary id="bulkBtn">批量导入</summary>
+      <p class="hint">每行一条密钥。空行和以 # 开头的行会忽略，重复的会去掉。不以 atr_ 开头的行会跳过。</p>
+      <textarea id="bulkText" placeholder="atr_xxx&#10;atr_yyy&#10;# 注释会被忽略"></textarea>
+      <div class="row">
+        <input type="file" id="bulkFile" accept=".txt,text/plain" class="grow">
+        <button class="btn sm" type="button" onclick="loadBulkFile()">读取文本文件</button>
+        <button class="btn sm" type="button" onclick="previewBulk()">预览</button>
+        <span id="bulkPreview" class="muted" style="font-size:12px"></span>
+      </div>
+      <div class="row">
+        <span class="muted" style="font-size:13px">统一权重</span>
+        <input id="bulkWeight" class="narrow" type="number" value="1" min="1" inputmode="numeric">
+        <input id="bulkProxy" class="grow" placeholder="统一代理，可留空">
+        <button class="btn primary" type="button" onclick="importBulk()">开始导入</button>
+      </div>
+    </details>
+  </section>
+
+  <section>
+    <h2>下游调用密钥</h2>
+    <p class="hint">客户端访问这个网关时使用。和面板密码无关，删掉后对应客户端会立刻无法调用。</p>
+    <div class="scroll">
+      <table class="slim">
+        <thead><tr><th>密钥（已掩码）</th><th class="right">操作</th></tr></thead>
+        <tbody id="apiKeysBody"></tbody>
+      </table>
+    </div>
+    <form class="row" onsubmit="return addAPIKey(event)">
+      <input id="newAPIKey" class="grow" placeholder="新的下游调用密钥" autocomplete="off">
+      <button class="btn primary" type="submit">添加下游密钥</button>
+    </form>
+  </section>
+
+  <section>
+    <h2>接口调用</h2>
+    <p class="hint">本网关收到的请求，不是上游 Atria 的账单。</p>
+    <div class="scroll">
+      <table>
+        <thead><tr>
+          <th>路径</th><th>请求</th><th>错误</th><th>进行中</th><th>最近状态</th><th>最近时间</th><th>最近错误</th>
+        </tr></thead>
+        <tbody id="statsBody"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>网关设置</h2>
+    <p class="hint">保存后立即生效，并写回配置文件。改上游地址仍需编辑配置文件后重载。</p>
+    <form onsubmit="return saveSettings(event)">
+      <div class="row">
+        <input id="setModel" class="grow" placeholder="默认模型，例如 Atria-Dawn-Preview">
+        <select id="setPolicy" class="grow" title="代理策略">
+          <option value="round-robin">轮询</option>
+          <option value="random">随机</option>
+          <option value="sticky-key">按密钥固定</option>
+        </select>
+        <button class="btn primary" type="submit">保存设置</button>
+      </div>
+      <label class="chk"><input id="setForce" type="checkbox"> 把客户端传来的模型名改写成上面的默认模型</label>
+    </form>
+  </section>
+
+  <section>
+    <h2>SOCKS5 代理 <span class="pill dim" id="proxiesPill"></span></h2>
+    <p class="hint">每行一个 socks5:// 地址。空行和 # 注释会忽略。保存会替换整个代理池；留空保存则改为直连。</p>
+    <div class="scroll">
+      <table class="slim">
+        <thead><tr><th>地址（已掩码）</th><th>权重</th><th>状态</th><th>失败</th><th>成功</th><th>恢复</th></tr></thead>
+        <tbody id="proxiesBody"></tbody>
+      </table>
+    </div>
+    <textarea id="proxyText" rows="4" placeholder="socks5://用户:密码@1.2.3.4:1080"></textarea>
+    <div class="row">
+      <button class="btn primary" type="button" onclick="saveProxies()">保存代理池</button>
+      <span id="proxyHint" class="muted" style="font-size:12px"></span>
+    </div>
+  </section>
+
+  <section>
+    <h2>Token 用量</h2>
+    <p class="hint">成功请求里解析到的用量。流式响应要等结束才会记入。</p>
+    <div class="subhead">按密钥</div>
+    <div class="scroll">
+      <table class="slim"><thead><tr><th>编号</th><th>请求</th><th>输入</th><th>输出</th><th>错误</th></tr></thead>
+        <tbody id="usageKeysBody"></tbody></table>
+    </div>
+    <div class="subhead">按模型</div>
+    <div class="scroll">
+      <table class="slim"><thead><tr><th>模型</th><th>请求</th><th>输入</th><th>输出</th></tr></thead>
+        <tbody id="usageModelsBody"></tbody></table>
+    </div>
+  </section>
+
+  <div class="foot">atria2api · 面板密码只留在当前会话 · <a href="/healthz">健康检查</a></div>
+</main>
+
+<div id="toast"></div>
+
+<script>
+function toast(msg, isErr) {
+  var t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = 'show' + (isErr ? ' err' : '');
+  clearTimeout(toast._t);
+  toast._t = setTimeout(function(){ t.className = ''; }, 2200);
+}
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"]/g, function(c){
+    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];
+  });
+}
+function attr(s) { return esc(s).replace(/'/g, '&#39;'); }
+function fmtTime(t) {
+  if (!t || String(t).indexOf('0001-') === 0) return '—';
+  var d = new Date(t);
+  if (isNaN(d.getTime())) return '—';
+  return d.toLocaleString('zh-CN', {hour12:false, month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', second:'2-digit'});
+}
+var STATE_TEXT = {healthy:'可用', ok:'正常', enabled:'已启用', disabled:'已停用', cooldown:'冷却中', manual_off:'已禁用', rpm_reserve:'额度不足'};
+function stateText(state) { return STATE_TEXT[state] || state || '未知'; }
+function pill(state, text) {
+  var cls = 'dim';
+  if (state === 'healthy' || state === 'ok' || state === 'enabled') cls = 'ok';
+  else if (state === 'disabled') cls = 'bad';
+  else if (state === 'cooldown' || state === 'manual_off' || state === 'rpm_reserve') cls = 'warn';
+  return '<span class="pill ' + cls + '">' + esc(text || stateText(state)) + '</span>';
+}
+function fmtTokens(n) { return String(n || 0).replace(/\B(?=(\d{3})+(?!\d))/g, ','); }
+function emptyRow(cols, text) { return '<tr><td colspan="' + cols + '" class="muted">' + esc(text) + '</td></tr>'; }
+function doLogin(){ document.getElementById('login').style.display='none'; paint(); toast('这是本地预览，不会连接网关'); }
+function logout(){ document.getElementById('login').style.display='flex'; }
+function toggleAuto(){ toast('预览里不刷新数据'); }
+function refresh(){ paint(); toast('已用示例数据重绘'); }
+function refreshLbl(msg){ document.getElementById('refreshLbl').textContent = msg; }
+function keyAct(id, action){ toast(action==='del' ? '预览：不会真的删除' : '预览：不会改状态'); }
+function addKey(e){ e.preventDefault(); toast('预览：不会写入密钥'); return false; }
+function addAPIKey(e){ e.preventDefault(); toast('预览：不会写入密钥'); return false; }
+function delAPIKey(){ toast('预览：不会删除'); }
+function loadBulkFile(){ toast('预览：不会读取文件'); }
+function previewBulk(){ toast('可导入 2 条'); }
+function importBulk(){ toast('预览：不会导入'); }
+function saveSettings(e){ e.preventDefault(); toast('预览：不会保存设置'); return false; }
+function saveProxies(){ toast('预览：不会替换代理池'); }
+
+function paint(){
+  document.getElementById('login').style.display='none';
+  document.getElementById('healthDot').className='dot';
+  document.getElementById('upstreamLbl').textContent='https://api.atria-asi.ai';
+  refreshLbl('预览数据');
+  var cards=[
+    ['监听','0.0.0.0:8318'],
+    ['上游','https://api.atria-asi.ai'],
+    ['默认模型','Atria-Dawn-Preview'],
+    ['上游密钥','2 可用 / 3 个'],
+    ['代理','2 个节点'],
+    ['客户端鉴权','需要下游密钥'],
+    ['面板访问','仅本机'],
+    ['调试端口','127.0.0.1:8319']
+  ];
+  document.getElementById('overview').innerHTML=cards.map(function(c){
+    return '<div class="card"><div class="k">'+esc(c[0])+'</div><div class="v">'+esc(c[1])+'</div></div>';
+  }).join('');
+  document.getElementById('keysPill').textContent='2 / 3';
+  var keys=[
+    {id:'a1b2c3d4e5', weight:2, state:'healthy', reason:'', until:'', rpm_limit:60, rpm_remaining:41, inflight:1, success_count:128, error_count:2, req:86, pin:18420, pout:9320},
+    {id:'f6e5d4c3b2', weight:1, state:'cooldown', reason:'上游返回 429', until:new Date(Date.now()+42000).toISOString(), rpm_limit:60, rpm_remaining:0, inflight:0, success_count:40, error_count:6, req:22, pin:4100, pout:900},
+    {id:'9988776655', weight:1, state:'manual_off', reason:'手动禁用', until:'', rpm_limit:0, rpm_remaining:0, inflight:0, success_count:3, error_count:1, req:3, pin:200, pout:80}
+  ];
+  document.getElementById('keysBody').innerHTML=keys.map(function(k){
+    var on=k.state==='disabled'||k.state==='manual_off';
+    var act=on?'<button class="btn sm" onclick="keyAct(\''+k.id+'\',\'enable\')">启用</button>':'<button class="btn sm" onclick="keyAct(\''+k.id+'\',\'disable\')">禁用</button>';
+    act+='<button class="btn sm danger" onclick="keyAct(\''+k.id+'\',\'del\')">删除</button>';
+    return '<tr><td class="mono">'+k.id+'</td><td class="num">'+k.weight+'</td><td>'+pill(k.state)+'</td><td class="muted">'+esc(k.reason||'—')+'</td><td>'+fmtTime(k.until)+'</td><td class="num">'+(k.rpm_limit?(k.rpm_remaining+' / '+k.rpm_limit):'—')+'</td><td class="num">'+k.inflight+'</td><td class="num">'+k.success_count+' / <span class="'+(k.error_count?'err':'')+'">'+k.error_count+'</span></td><td class="num">'+k.req+'</td><td class="num">'+fmtTokens(k.pin)+'</td><td class="num">'+fmtTokens(k.pout)+'</td><td class="num">'+fmtTokens(k.pin+k.pout)+'</td><td class="right"><div class="actions">'+act+'</div></td></tr>';
+  }).join('');
+  document.getElementById('apiKeysBody').innerHTML=
+    '<tr><td class="mono">gw-****me</td><td class="right"><div class="actions"><button class="btn sm danger" onclick="delAPIKey()">删除</button></div></td></tr>'+
+    '<tr><td class="mono">ck-****42</td><td class="right"><div class="actions"><button class="btn sm danger" onclick="delAPIKey()">删除</button></div></td></tr>';
+  document.getElementById('statsBody').innerHTML=[
+    ['/v1/chat/completions',240,4,1,200,'—'],
+    ['/v1/messages',18,1,0,200,'—'],
+    ['/v1/responses',7,2,0,429,'上游返回 429']
+  ].map(function(r){
+    return '<tr><td class="mono">'+r[0]+'</td><td class="num">'+r[1]+'</td><td class="num '+(r[2]?'err':'')+'">'+r[2]+'</td><td class="num">'+r[3]+'</td><td class="num">'+r[4]+'</td><td class="muted">'+fmtTime(new Date().toISOString())+'</td><td class="err">'+esc(r[5])+'</td></tr>';
+  }).join('');
+  document.getElementById('setModel').value='Atria-Dawn-Preview';
+  document.getElementById('setForce').checked=true;
+  document.getElementById('setPolicy').value='round-robin';
+  document.getElementById('proxiesPill').textContent='2 个';
+  document.getElementById('proxiesBody').innerHTML=
+    '<tr><td class="mono">socks5://***@203.0.113.10:1080</td><td class="num">1</td><td>'+pill('ok','正常')+'</td><td class="num">0</td><td class="num">86</td><td>—</td></tr>'+
+    '<tr><td class="mono">socks5://***@203.0.113.11:1080</td><td class="num">1</td><td>'+pill('bad','不可用')+'</td><td class="num err">3</td><td class="num">12</td><td>'+fmtTime(new Date(Date.now()+20000).toISOString())+'</td></tr>';
+  document.getElementById('proxyHint').textContent='上面是掩码地址。要修改请重新粘贴完整地址再保存。';
+  document.getElementById('usageKeysBody').innerHTML=
+    '<tr><td class="mono">a1b2c3d4e5</td><td class="num">86</td><td class="num">18,420</td><td class="num">9,320</td><td class="num err">2</td></tr>'+
+    '<tr><td class="mono">f6e5d4c3b2</td><td class="num">22</td><td class="num">4,100</td><td class="num">900</td><td class="num err">6</td></tr>';
+  document.getElementById('usageModelsBody').innerHTML=
+    '<tr><td class="mono">Atria-Dawn-Preview</td><td class="num">108</td><td class="num">22,520</td><td class="num">10,220</td></tr>';
+}
+paint();
+</script></script>
+</body>
+</html>

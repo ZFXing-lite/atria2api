@@ -232,9 +232,8 @@ func (c *Config) normalize() error {
 	if c.Upstream.ConnectTimeout <= 0 {
 		c.Upstream.ConnectTimeout = Duration(15 * time.Second)
 	}
-	if len(c.Upstream.Keys) == 0 {
-		return fmt.Errorf("upstream.keys is empty: add at least one atr_ key (see https://api.atria-asi.ai/docs)")
-	}
+	// An empty key list is allowed so the process can boot and the panel can
+	// add the first key. /healthz stays 503 until one exists.
 	seen := map[string]bool{}
 	for i := range c.Upstream.Keys {
 		k := strings.TrimSpace(c.Upstream.Keys[i].Key)

@@ -8,9 +8,12 @@ import (
 
 func TestDefaultsAndValidation(t *testing.T) {
 	t.Setenv("ATRIA2API_KEYS", "")
-	_, err := Load("")
-	if err == nil {
-		t.Fatal("expected error without any upstream key")
+	empty, err := Load("")
+	if err != nil {
+		t.Fatalf("empty key list must boot so the panel can add the first key: %v", err)
+	}
+	if len(empty.Upstream.Keys) != 0 {
+		t.Fatalf("expected no keys, got %d", len(empty.Upstream.Keys))
 	}
 
 	t.Setenv("ATRIA2API_KEYS", "atr_a, atr_b")

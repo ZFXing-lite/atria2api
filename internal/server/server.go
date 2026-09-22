@@ -53,13 +53,13 @@ func New(cfg *config.Config, relayer *relay.Relayer, pool *keypool.Pool,
 		stats: NewStats(), configPath: configPath,
 		log: slog.With("component", "server"), started: time.Now()}
 	s.cfg.Store(cfg)
-	s.mgmtOn.Store(cfg.Management.SecretKey != "")
+	s.mgmtOn.Store(true)
 	return s
 }
 
 func (s *Server) Update(cfg *config.Config) {
 	s.cfg.Store(cfg)
-	s.mgmtOn.Store(strings.TrimSpace(cfg.Management.SecretKey) != "")
+	s.mgmtOn.Store(true)
 }
 
 // SetProxyRebuilder installs the hook that rebuilds the SOCKS5 pool after a

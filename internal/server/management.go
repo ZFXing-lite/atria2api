@@ -46,6 +46,8 @@ func (s *Server) management(w http.ResponseWriter, r *http.Request) {
 	cfg := s.cfg.Load()
 
 	// The panel itself is public HTML; its JS authenticates every API call.
+	// Serve it even when the secret is still empty, so a first boot shows the
+	// login page (and a clear "password not set" error) instead of a bare 404.
 	p := strings.TrimPrefix(r.URL.Path, "/v0/management")
 	if p == "" || p == "/" || p == "/panel" {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")

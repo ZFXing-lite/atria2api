@@ -11,6 +11,7 @@ import (
 	"net/http/pprof"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -33,6 +34,10 @@ func main() {
 		cfgPath = v
 	}
 
+	if err := ensureConfig(cfgPath); err != nil {
+		fmt.Fprintf(os.Stderr, "config: %v\n", err)
+		os.Exit(2)
+	}
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "config: %v\n", err)
@@ -40,6 +45,9 @@ func main() {
 	}
 	setupLogger(cfg)
 
+	if len(cfg.Upstream.Keys) == 0 {
+		slog.Warn("no upstream keys yet; the gateway answers 503 until one is added in the panel or ATRIA2API_KEYS")
+	}
 	slog.Info("atria2api starting",
 		"listen", cfg.ListenAddr(), "base-url", cfg.Upstream.BaseURL,
 		"keys", len(cfg.Upstream.Keys), "proxies", countProxies(cfg),
@@ -204,6 +212,35 @@ func setupLogger(cfg *config.Config) {
 		h = slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level})
 	}
 	slog.SetDefault(slog.New(h))
+}
+
+// ensureConfig writes the bundled example the first time the configured path
+// is missing, so `docker compose up` does not fail on a volume that points at
+// nothing. An existing file is never overwritten.
+func ensureConfig(path string) error {
+	if path == "" {
+		return nil
+	}
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	candidates := []string{"/app/config.example.yaml", "config.example.yaml"}
+	if exe, err := os.Executable(); err == nil {
+		candidates = append(candidates, filepath.Join(filepath.Dir(exe), "config.example.yaml"))
+	}
+	for _, candidate := range candidates {
+		raw, err := os.ReadFile(candidate)
+		if err != nil {
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil && filepath.Dir(path) != "." {
+			return err
+		}
+		return os.WriteFile(path, raw, 0o600)
+	}
+	return nil
 }
 
 func warnPlaceholders(cfg *config.Config) {

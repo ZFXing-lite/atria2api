@@ -10,11 +10,10 @@ tls:
   cert: ""
   key: ""
 
-# Keys clients use to call THIS gateway (downstream auth). Leave empty to run
-# an open gateway (not recommended when exposed to the internet).
-api-keys:
-  - "gw-change-me-1"
-  - "gw-change-me-2"
+# Keys clients use to call THIS gateway (downstream auth). Leave the list
+# empty for an open gateway, then add real keys from the panel. Do not ship
+# placeholder values: a client using them would just get 401.
+api-keys: []
 
 # The single Atria API endpoint. Keys are rotated by the pool below.
 upstream:
@@ -25,25 +24,22 @@ upstream:
   force-model: true
   timeout: 10m
   connect-timeout: 15s
-  # One or more atr_ keys. Weight drives the weighted round-robin pick.
-  keys:
-    - key: "atr_replace_me_1"
-      weight: 1
-      # proxy: ""            # optional per-key override: a socks5:// URL, or "none"
-    - key: "atr_replace_me_2"
-      weight: 1
+  # One or more atr_ keys. Leave empty and add them from the panel, or set
+  # ATRIA2API_KEYS=atr_xxx,atr_yyy. Weight drives the weighted round-robin pick.
+  keys: []
+    # - key: "atr_xxx"
+    #   weight: 1
+    #   proxy: ""            # optional per-key override: a socks5:// URL, or "none"
 
-# SOCKS5 egress pool. Leave the list empty for direct connections.
-# Atria rate limits are per account; different egress IPs do not raise the
-# limit, but a proxy pool keeps your server IP off the upstream's radar and
-# lets a key keep working from a clean address after an IP-level block.
+# SOCKS5 egress pool. Leave the list empty for a direct connection.
+# Add nodes from the panel, or uncomment a real socks5:// URL below.
+# Atria rate limits are per account; a different egress IP does not raise them.
 proxy:
   policy: "round-robin"   # round-robin | random | sticky-key (sticky per key id)
   health-every: 30s
   fail-cooldown: 30s
-  socks5:
-    - url: "socks5://user:pass@1.2.3.4:1080"
-    # - url: "socks5://h.t.d:1080"
+  socks5: []
+    # - url: "socks5://user:pass@1.2.3.4:1080"
 
 # Rate-limit handling, retries and cooldowns (upstream sends these headers on
 # 429: Retry-After, x-rpm-limit, x-rpm-remaining; see the docs section
