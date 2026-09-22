@@ -70,6 +70,9 @@ const panelHTML = `<!DOCTYPE html>
   #login p { color:var(--dim); font-size:12px; margin:0 0 14px; }
   #login input { width:100%; margin-bottom:12px; }
   .foot { color:var(--dim); font-size:12px; text-align:center; }
+  textarea { width:100%; background:var(--bg); color:var(--text); border:1px solid var(--border);
+    border-radius:6px; padding:8px; font:12px ui-monospace,Menlo,Consolas,monospace; }
+  label.chk { display:flex; align-items:center; gap:6px; font-size:13px; color:var(--dim); }
 </style>
 </head>
 <body>
@@ -162,12 +165,34 @@ const panelHTML = `<!DOCTYPE html>
   </section>
 
   <section>
+    <h2>网关设置</h2>
+    <form class="inline" onsubmit="return saveSettings(event)">
+      <input id="setModel" class="wide" placeholder="默认模型，如 Atria-Dawn-Preview">
+      <label class="chk"><input id="setForce" type="checkbox"> 强制改写请求模型</label>
+      <select id="setPolicy" title="代理策略">
+        <option value="round-robin">round-robin</option>
+        <option value="random">random</option>
+        <option value="sticky-key">sticky-key</option>
+      </select>
+      <button class="btn primary" type="submit">保存设置</button>
+    </form>
+    <div class="muted" style="margin-top:6px;font-size:12px">模型与代理策略立即生效并写回 config.yaml。上游地址只在概览里展示，改地址请编辑配置文件。</div>
+  </section>
+
+  <section>
     <h2>SOCKS5 代理池 <span class="pill dim" id="proxiesPill"></span></h2>
     <table>
       <thead><tr><th>代理（掩码）</th><th>权重</th><th>健康</th><th>失败次数</th><th>成功次数</th><th>恢复时间</th></tr></thead>
       <tbody id="proxiesBody"></tbody>
     </table>
-    <div class="muted" style="margin-top:8px;font-size:12px">代理列表在 config.yaml 的 proxy.socks5 中维护，修改后重启生效。</div>
+    <div style="margin-top:12px">
+      <div class="muted" style="font-size:12px;margin-bottom:6px">每行一个 socks5:// URL，空行和 # 注释忽略。保存后立即替换整个代理池；留空并保存则改为直连。</div>
+      <textarea id="proxyText" rows="4" placeholder="socks5://user:pass@1.2.3.4:1080"></textarea>
+      <div class="inline" style="margin-top:8px">
+        <button class="btn primary" onclick="saveProxies()">保存代理池</button>
+        <span id="proxyHint" class="muted" style="font-size:12px"></span>
+      </div>
+    </div>
   </section>
 
   <section>
@@ -256,10 +281,12 @@ function refresh() {
     api('/v0/management/keys'),
     api('/v0/management/api-keys'),
     api('/v0/management/usage').catch(function(){ return {enabled:false}; }),
-    api('/v0/management/proxies')
+    api('/v0/management/proxies'),
+    api('/v0/management/settings').catch(function(){ return null; })
   ]).then(function(all){
     renderOverview(all[0]); renderKeys(all[0], all[1], all[3]); renderAPIKeys(all[2]);
     renderStats(all[0]); renderProxies(all[0], all[4]); renderUsage(all[3]);
+    renderSettings(all[5]);
     document.getElementById('healthDot').className =
       'dot' + (all[0].keys_healthy>0 ? '' : ' off');
   }).catch(function(e){
@@ -445,6 +472,50 @@ function renderStats(s) {
   document.getElementById('statsBody').innerHTML = rows;
 }
 
+function renderSettings(st) {
+  if (!st) return;
+  var model = document.getElementById('setModel');
+  var force = document.getElementById('setForce');
+  var policy = document.getElementById('setPolicy');
+  if (document.activeElement !== model) model.value = st.default_model || '';
+  if (document.activeElement !== force) force.checked = !!st.force_model;
+  if (document.activeElement !== policy && st.proxy_policy) policy.value = st.proxy_policy;
+}
+
+function saveSettings(e) {
+  e.preventDefault();
+  var model = document.getElementById('setModel').value.trim();
+  if (!model) { toast('默认模型不能为空', true); return false; }
+  api('/v0/management/settings', 'PUT', {
+    default_model: model,
+    force_model: document.getElementById('setForce').checked,
+    proxy_policy: document.getElementById('setPolicy').value
+  }).then(function(){ toast('设置已保存并生效'); refresh(); })
+    .catch(function(err){ toast('保存失败: '+err, true); });
+  return false;
+}
+
+function parseProxyText(text) {
+  var out = [];
+  (text || '').split(/\r?\n/).forEach(function(line) {
+    var u = line.trim();
+    if (!u || u.charAt(0) === '#') return;
+    out.push({url: u, weight: 1});
+  });
+  return out;
+}
+
+function saveProxies() {
+  var list = parseProxyText(document.getElementById('proxyText').value);
+  var msg = list.length ? ('将替换为 '+list.length+' 个代理节点，确认？') : '代理列表为空，网关将改为直连，确认？';
+  if (!confirm(msg)) return;
+  api('/v0/management/proxies', 'PUT', {proxies: list}).then(function(res){
+    toast('代理池已更新：' + (res.count||0) + ' 个节点');
+    document.getElementById('proxyText').value = '';
+    refresh();
+  }).catch(function(err){ toast('代理保存失败: '+err, true); });
+}
+
 function renderProxies(s, res) {
   var list = res.proxies || [];
   document.getElementById('proxiesPill').textContent = list.length + ' 个';
@@ -455,6 +526,12 @@ function renderProxies(s, res) {
       + '<td>'+px.success_count+'</td><td>'+fmtTime(px.fail_until)+'</td></tr>';
   }).join('') || '<tr><td colspan="6" class="muted">未配置代理（直连）</td></tr>';
   document.getElementById('proxiesBody').innerHTML = rows;
+  var box = document.getElementById('proxyText');
+  if (document.activeElement !== box && !box.value) {
+    document.getElementById('proxyHint').textContent = list.length
+      ? '当前 '+list.length+' 个节点（地址已掩码，重新填写完整 URL 再保存）'
+      : '当前直连';
+  }
 }
 
 function renderUsage(u) {

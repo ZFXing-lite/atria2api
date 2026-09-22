@@ -33,7 +33,7 @@ func TestBulkImport(t *testing.T) {
 	s, cfgPath := bulkServer(t)
 
 	req := httptest.NewRequest("POST", "/v0/management/keys/bulk",
-		strings.NewReader(`{"keys":["atr_a","atr_b","","  atr_a  ","# comment","atr_c"],"weight":2}`))
+		strings.NewReader(`{"keys":["atr_aaa1","atr_bbb2","","  atr_aaa1  ","# comment","atr_ccc3","not-a-key"],"weight":2}`))
 	req.Header.Set("X-Management-Key", "mgt")
 	w := httptest.NewRecorder()
 	s.Handler().ServeHTTP(w, req)
@@ -47,9 +47,10 @@ func TestBulkImport(t *testing.T) {
 		IDs     []string `json:"ids"`
 	}
 	json.Unmarshal(w.Body.Bytes(), &res)
-	// 3 new (a,b,c); ignored: blank line, in-batch duplicate, comment line.
-	if res.Added != 3 || res.Updated != 0 || res.Skipped != 3 {
-		t.Fatalf("counts wrong: +%d ~%d /%d (want 3/0/3)", res.Added, res.Updated, res.Skipped)
+	// 3 new keys; ignored: blank, in-batch duplicate, comment, and a line that
+	// does not look like an atr_ key.
+	if res.Added != 3 || res.Updated != 0 || res.Skipped != 4 {
+		t.Fatalf("counts wrong: +%d ~%d /%d (want 3/0/4)", res.Added, res.Updated, res.Skipped)
 	}
 	if len(res.IDs) != 3 {
 		t.Fatalf("ids = %v", res.IDs)
@@ -60,7 +61,7 @@ func TestBulkImport(t *testing.T) {
 		t.Fatalf("pool should have 4 keys, got %d/%d", total, healthy)
 	}
 	b, _ := os.ReadFile(cfgPath)
-	if !strings.Contains(string(b), "atr_a") || !strings.Contains(string(b), "atr_c") {
+	if !strings.Contains(string(b), "atr_aaa1") || !strings.Contains(string(b), "atr_ccc3") {
 		t.Fatalf("keys not persisted: %s", b)
 	}
 }
@@ -69,7 +70,7 @@ func TestBulkImportUpdatesExisting(t *testing.T) {
 	s, _ := bulkServer(t)
 
 	req := httptest.NewRequest("POST", "/v0/management/keys/bulk",
-		strings.NewReader(`{"keys":["atr_old","atr_new"],"weight":5}`))
+		strings.NewReader(`{"keys":["atr_old","atr_newkey1"],"weight":5}`))
 	req.Header.Set("X-Management-Key", "mgt")
 	w := httptest.NewRecorder()
 	s.Handler().ServeHTTP(w, req)
@@ -78,6 +79,9 @@ func TestBulkImportUpdatesExisting(t *testing.T) {
 		Updated int `json:"updated"`
 	}
 	json.Unmarshal(w.Body.Bytes(), &res)
+	if w.Code != 200 {
+		t.Fatalf("bulk update: %d %s", w.Code, w.Body.String())
+	}
 	if res.Added != 1 || res.Updated != 1 {
 		t.Fatalf("want 1 added 1 updated, got +%d ~%d", res.Added, res.Updated)
 	}
@@ -115,7 +119,7 @@ func TestBulkImportRejectsEmpty(t *testing.T) {
 func TestBulkImportNeedsKey(t *testing.T) {
 	s, _ := bulkServer(t)
 	req := httptest.NewRequest("POST", "/v0/management/keys/bulk",
-		strings.NewReader(`{"keys":["atr_a"]}`))
+		strings.NewReader(`{"keys":["atr_aaa1"]}`))
 	w := httptest.NewRecorder()
 	s.Handler().ServeHTTP(w, req)
 	if w.Code != 401 {

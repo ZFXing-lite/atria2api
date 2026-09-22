@@ -6,10 +6,10 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"path"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/ZFXing-lite/atria2api/internal/config"
@@ -24,7 +24,17 @@ const (
 	loginLockout     = 15 * time.Minute
 )
 
-var loginFails sync.Map // ip -> *int64
+// loginState tracks wrong-password attempts for one source IP. LockedUntil is
+// set when the counter reaches maxLoginFailures and cleared once it expires,
+// so a correct password works again after the lockout instead of staying
+// locked forever.
+type loginState struct {
+	mu          sync.Mutex
+	fails       int
+	lockedUntil time.Time
+}
+
+var loginFails sync.Map // ip -> *loginState
 
 // management exposes runtime controls plus the web panel. The whole group is
 // disabled (404) when remote-management.secret-key is empty.
@@ -76,7 +86,7 @@ func (s *Server) management(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case p == "/endpoints":
 		writeJSON(w, http.StatusOK, map[string]any{"endpoints": []string{
-			"/config", "/keys", "/keys/bulk", "/api-keys", "/usage", "/stats", "/proxies", "/panel",
+			"/config", "/keys", "/keys/bulk", "/api-keys", "/usage", "/stats", "/proxies", "/settings", "/panel",
 		}})
 	case p == "/config":
 		b, err := cfg.SnapshotJSON()
@@ -143,8 +153,15 @@ func (s *Server) management(w http.ResponseWriter, r *http.Request) {
 	case p == "/stats":
 		s.statsHandler(w, r)
 
-	case p == "/proxies":
+	case p == "/proxies" && r.Method == http.MethodGet:
 		writeJSON(w, http.StatusOK, map[string]any{"proxies": proxyStatusList(s.proxies)})
+	case p == "/proxies" && r.Method == http.MethodPut:
+		s.replaceProxies(w, r)
+
+	case p == "/settings" && r.Method == http.MethodGet:
+		s.settingsHandler(w, r)
+	case p == "/settings" && r.Method == http.MethodPut:
+		s.updateSettings(w, r)
 
 	default:
 		// Known endpoints with the wrong method return 405 instead of 404, so a
@@ -165,8 +182,23 @@ func isKnownManagementPath(p string) bool {
 		return strings.HasSuffix(p, "/disable") || strings.HasSuffix(p, "/enable")
 	case strings.HasPrefix(p, "/api-keys/"):
 		return true
+	case p == "/proxies", p == "/settings", p == "/keys", p == "/keys/bulk", p == "/api-keys":
+		return true
 	}
 	return false
+}
+
+// validAtriaKey is the panel/API gate. Keys already in config.yaml are not
+// re-checked, so a hand-edited file can still boot; new keys typed into the
+// panel must look like atr_ credentials.
+func validAtriaKey(key string) bool {
+	if len(key) < 5 || len(key) > 512 {
+		return false
+	}
+	if strings.ContainsAny(key, " \t\r\n") {
+		return false
+	}
+	return strings.HasPrefix(key, "atr_")
 }
 
 func proxyStatusList(p *proxypool.Pool) []proxypool.Status {
@@ -189,18 +221,17 @@ func (s *Server) addUpstreamKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Key = strings.TrimSpace(req.Key)
-	if req.Key == "" {
-		writeJSON(w, http.StatusBadRequest, errBody("key is required", "bad_request"))
+	if !validAtriaKey(req.Key) {
+		writeJSON(w, http.StatusBadRequest, errBody("key must start with atr_ and contain no spaces", "bad_request"))
 		return
 	}
 	id := s.pool.AddKey(req.Key, req.Weight, req.Proxy)
 	if id == "" {
-		writeJSON(w, http.StatusBadRequest, errBody("invalid key", "bad_request"))
+		writeJSON(w, http.StatusBadRequest, errBody("invalid key: must start with atr_ and contain no spaces", "bad_request"))
 		return
 	}
 	if !s.mutateConfig(func(c *config.Config) bool {
-		c.AddUpstreamKey(req.Key, req.Weight, req.Proxy)
-		return true
+		return c.AddUpstreamKey(req.Key, req.Weight, req.Proxy) != ""
 	}) {
 		writeJSON(w, http.StatusInternalServerError, errBody("config not persisted", "persist_failed"))
 		return
@@ -235,6 +266,10 @@ func (s *Server) bulkAddUpstreamKeys(w http.ResponseWriter, r *http.Request) {
 			skipped++
 			continue
 		}
+		if !validAtriaKey(k) {
+			skipped++
+			continue
+		}
 		if seen[k] {
 			skipped++
 			continue
@@ -246,16 +281,22 @@ func (s *Server) bulkAddUpstreamKeys(w http.ResponseWriter, r *http.Request) {
 			skipped++
 			continue
 		}
+		persisted := s.mutateConfig(func(c *config.Config) bool {
+			return c.AddUpstreamKey(k, req.Weight, proxy) != ""
+		})
+		if !persisted {
+			if !existed {
+				s.pool.RemoveKey(id)
+			}
+			skipped++
+			continue
+		}
 		if existed {
 			updated++
 		} else {
 			added++
 			ids = append(ids, id)
 		}
-		s.mutateConfig(func(c *config.Config) bool {
-			c.AddUpstreamKey(k, req.Weight, proxy)
-			return true
-		})
 	}
 	slog.Info("bulk import", "added", added, "updated", updated, "skipped", skipped)
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -302,12 +343,129 @@ func (s *Server) mutateConfig(fn func(*config.Config) bool) bool {
 		slog.Error("persist config failed", "err", err)
 		return false
 	}
+	if st, err := os.Stat(s.configPath); err == nil {
+		s.MarkSaved(st.ModTime())
+	}
 	// Config on disk is now authoritative; reconcile the pool to it. Keys still
 	// in flight keep working: SyncKeys only drops pool entries that are gone
 	// from config, and they were just removed by fn above.
 	s.Update(&cp)
 	s.pool.SyncKeys(toPoolKeys(&cp))
+	if s.rebuild != nil {
+		s.rebuild(&cp)
+	}
 	return true
+}
+
+// replaceProxies replaces the SOCKS5 pool from the panel. An empty list
+// switches the gateway to direct connections. The new pool takes effect on
+// the next upstream request.
+func (s *Server) replaceProxies(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Proxies []struct {
+			URL    string `json:"url"`
+			Weight int    `json:"weight"`
+		} `json:"proxies"`
+		Policy string `json:"policy"`
+	}
+	if err := decodeBody(r, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, errBody(err.Error(), "bad_request"))
+		return
+	}
+	entries := make([]config.ProxyEntry, 0, len(req.Proxies))
+	for _, p := range req.Proxies {
+		u := strings.TrimSpace(p.URL)
+		if u == "" {
+			continue
+		}
+		if err := proxypool.ParseURL(u); err != nil {
+			writeJSON(w, http.StatusBadRequest, errBody("invalid proxy "+u+": "+err.Error(), "bad_proxy"))
+			return
+		}
+		wht := p.Weight
+		if wht <= 0 {
+			wht = 1
+		}
+		entries = append(entries, config.ProxyEntry{URL: u, Weight: wht})
+	}
+	policy := strings.ToLower(strings.TrimSpace(req.Policy))
+	if !s.mutateConfig(func(c *config.Config) bool {
+		c.Proxy.SOCKS5 = entries
+		if policy != "" {
+			switch policy {
+			case "round-robin", "random", "sticky-key":
+				c.Proxy.Policy = policy
+			default:
+				return false
+			}
+		}
+		return true
+	}) {
+		writeJSON(w, http.StatusBadRequest, errBody("invalid proxy policy or config not persisted", "bad_request"))
+		return
+	}
+	slog.Info("proxy pool replaced", "count", len(entries), "policy", s.cfg.Load().Proxy.Policy)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "count": len(entries)})
+}
+
+// settingsHandler returns the knobs the panel can edit without a restart.
+func (s *Server) settingsHandler(w http.ResponseWriter, r *http.Request) {
+	cfg := s.cfg.Load()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"base_url":      cfg.Upstream.BaseURL,
+		"default_model": cfg.Upstream.DefaultModel,
+		"force_model":   cfg.Upstream.ForceModel,
+		"proxy_policy":  cfg.Proxy.Policy,
+	})
+}
+
+// updateSettings applies model / force-model / proxy-policy edits from the
+// panel. Empty fields are left unchanged.
+func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		DefaultModel *string `json:"default_model"`
+		ForceModel   *bool   `json:"force_model"`
+		ProxyPolicy  *string `json:"proxy_policy"`
+		BaseURL      *string `json:"base_url"`
+	}
+	if err := decodeBody(r, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, errBody(err.Error(), "bad_request"))
+		return
+	}
+	if !s.mutateConfig(func(c *config.Config) bool {
+		if req.DefaultModel != nil {
+			m := strings.TrimSpace(*req.DefaultModel)
+			if m == "" {
+				return false
+			}
+			c.Upstream.DefaultModel = m
+		}
+		if req.ForceModel != nil {
+			c.Upstream.ForceModel = *req.ForceModel
+		}
+		if req.BaseURL != nil {
+			u := strings.TrimRight(strings.TrimSpace(*req.BaseURL), "/")
+			if u == "" {
+				return false
+			}
+			c.Upstream.BaseURL = u
+		}
+		if req.ProxyPolicy != nil {
+			p := strings.ToLower(strings.TrimSpace(*req.ProxyPolicy))
+			switch p {
+			case "round-robin", "random", "sticky-key":
+				c.Proxy.Policy = p
+			default:
+				return false
+			}
+		}
+		return true
+	}) {
+		writeJSON(w, http.StatusBadRequest, errBody("invalid settings or config not persisted", "bad_request"))
+		return
+	}
+	slog.Info("gateway settings updated")
+	s.settingsHandler(w, r)
 }
 
 // statsHandler returns ports, endpoint call counters and health for the panel.
@@ -386,21 +544,40 @@ func clientIPOf(r *http.Request) string {
 	return ip
 }
 
+func loginStateOf(ip string) *loginState {
+	v, _ := loginFails.LoadOrStore(ip, &loginState{})
+	return v.(*loginState)
+}
+
 func loginLocked(ip string) (bool, time.Time) {
-	v, ok := loginFails.Load(ip)
-	if !ok {
+	st := loginStateOf(ip)
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.lockedUntil.IsZero() {
 		return false, time.Time{}
 	}
-	n := atomic.LoadInt64(v.(*int64))
-	if n < int64(maxLoginFailures) {
-		return false, time.Time{}
+	if time.Now().Before(st.lockedUntil) {
+		return true, st.lockedUntil
 	}
-	return true, time.Now().Add(loginLockout)
+	// Lockout elapsed: a correct password can get in again.
+	st.lockedUntil = time.Time{}
+	st.fails = 0
+	return false, time.Time{}
 }
 
 func loginFail(ip string) {
-	v, _ := loginFails.LoadOrStore(ip, new(int64))
-	atomic.AddInt64(v.(*int64), 1)
+	st := loginStateOf(ip)
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	now := time.Now()
+	if !st.lockedUntil.IsZero() && !now.Before(st.lockedUntil) {
+		st.lockedUntil = time.Time{}
+		st.fails = 0
+	}
+	st.fails++
+	if st.fails >= maxLoginFailures {
+		st.lockedUntil = now.Add(loginLockout)
+	}
 }
 
 func loginReset(ip string) { loginFails.Delete(ip) }

@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"context"
 	"net"
 	"net/http"
 	"strconv"
@@ -283,9 +284,6 @@ func (r *Relayer) forwardOnce(w http.ResponseWriter, req *http.Request, kind Kin
 		Transport: r.transportFor(lease, cfg),
 		Timeout:   cfg.Timeout,
 	}
-	if cfg.ConnectTimeout > 0 {
-		client.Transport = withConnectTimeout(client.Transport, cfg.ConnectTimeout)
-	}
 	resp, err := client.Do(upReq)
 	if err != nil {
 		return 0, nil, false, err, limits
@@ -528,13 +526,18 @@ func findUsageInStream(tail []byte, kind Kind) usage {
 	return parseUsage(kind, tail)
 }
 func (r *Relayer) transportFor(lease keypool.Lease, cfg Config) http.RoundTripper {
+	var rt http.RoundTripper
 	if ov := strings.TrimSpace(lease.ProxyURL); ov != "" {
-		return proxypool.TransportForURL(ov)
+		rt = proxypool.TransportForURL(ov)
+	} else if r.proxies != nil && !r.proxies.Empty() {
+		rt = r.proxies.Transport(lease.Entry.ID, nil)
+	} else {
+		rt = proxypool.TransportForURL("none")
 	}
-	if r.proxies != nil && !r.proxies.Empty() {
-		return r.proxies.Transport(lease.Entry.ID, nil)
+	if cfg.ConnectTimeout > 0 {
+		rt = withConnectTimeout(rt, cfg.ConnectTimeout)
 	}
-	return proxypool.TransportForURL("none")
+	return rt
 }
 
 // --- header plumbing ------------------------------------------------------
@@ -738,15 +741,25 @@ func truncate(s string, n int) string {
 	return s[:n] + "..."
 }
 
-// withConnectTimeout bounds just the connection setup (dial + TLS handshake)
-// so a dead upstream is abandoned before cfg.Timeout's full budget is spent.
+// withConnectTimeout bounds connection setup (dial + TLS handshake) so a dead
+// upstream is abandoned before cfg.Timeout's full budget is spent. An existing
+// DialContext (SOCKS5 or per-key proxy) is wrapped, never replaced: replacing
+// it would send traffic that was supposed to go through the proxy pool direct.
 func withConnectTimeout(rt http.RoundTripper, d time.Duration) http.RoundTripper {
 	t, ok := rt.(*http.Transport)
 	if !ok {
 		return rt
 	}
 	cp := t.Clone()
-	cp.DialContext = (&net.Dialer{Timeout: d, KeepAlive: 20 * time.Second}).DialContext
+	prev := cp.DialContext
+	if prev == nil {
+		prev = (&net.Dialer{KeepAlive: 20 * time.Second}).DialContext
+	}
+	cp.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		ctx, cancel := context.WithTimeout(ctx, d)
+		defer cancel()
+		return prev(ctx, network, addr)
+	}
 	cp.TLSHandshakeTimeout = d
 	cp.ExpectContinueTimeout = d
 	return cp

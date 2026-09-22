@@ -538,7 +538,7 @@ func (p *Pool) Has(key string) bool {
 // already exists. Returns the entry id. Existing cooldowns/counts are kept.
 func (p *Pool) AddKey(key string, weight int, proxy string) string {
 	key = strings.TrimSpace(key)
-	if key == "" {
+	if key == "" || strings.ContainsAny(key, " \t\r\n") {
 		return ""
 	}
 	if weight <= 0 {

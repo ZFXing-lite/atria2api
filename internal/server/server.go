@@ -19,6 +19,11 @@ import (
 	"github.com/ZFXing-lite/atria2api/internal/relay"
 )
 
+// ProxyRebuilder rebuilds the live SOCKS5 pool from config. main wires this
+// so panel edits and file reloads both swap the pool the relayer dials
+// through, instead of logging "restart to apply" and leaving the old pool.
+type ProxyRebuilder func(cfg *config.Config)
+
 // Server is the gateway HTTP front-end.
 type Server struct {
 	cfg     atomic.Pointer[config.Config]
@@ -34,6 +39,12 @@ type Server struct {
 	log        *slog.Logger
 	started    time.Time
 	configPath string
+	rebuild    ProxyRebuilder
+	// savedAt is the mtime of the config file written by mutateConfig. The
+	// file watcher uses it to ignore its own write, which would otherwise
+	// reload a copy that dropped the just-applied change when env overrides
+	// are in play, or race the live pool.
+	savedAt atomic.Int64
 }
 
 func New(cfg *config.Config, relayer *relay.Relayer, pool *keypool.Pool,
@@ -49,6 +60,22 @@ func New(cfg *config.Config, relayer *relay.Relayer, pool *keypool.Pool,
 func (s *Server) Update(cfg *config.Config) {
 	s.cfg.Store(cfg)
 	s.mgmtOn.Store(strings.TrimSpace(cfg.Management.SecretKey) != "")
+}
+
+// SetProxyRebuilder installs the hook that rebuilds the SOCKS5 pool after a
+// config mutation or reload.
+func (s *Server) SetProxyRebuilder(fn ProxyRebuilder) { s.rebuild = fn }
+
+// MarkSaved records the mtime of a config write the watcher should skip.
+func (s *Server) MarkSaved(t time.Time) { s.savedAt.Store(t.UnixNano()) }
+
+// OwnWrite reports whether mod is the config file this process just wrote.
+func (s *Server) OwnWrite(mod time.Time) bool {
+	saved := s.savedAt.Load()
+	if saved == 0 || mod.IsZero() {
+		return false
+	}
+	return mod.UnixNano() == saved
 }
 
 // ApplyReload is the hot-reload entry point: it publishes the freshly loaded

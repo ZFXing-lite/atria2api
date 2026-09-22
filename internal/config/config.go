@@ -238,9 +238,11 @@ func (c *Config) normalize() error {
 	seen := map[string]bool{}
 	for i := range c.Upstream.Keys {
 		k := strings.TrimSpace(c.Upstream.Keys[i].Key)
+		c.Upstream.Keys[i].Key = k
 		if k == "" {
 			return fmt.Errorf("upstream.keys[%d].key is empty", i)
 		}
+
 		if seen[k] {
 			return fmt.Errorf("upstream.keys[%d].key is duplicated: %s", i, mask(k))
 		}
@@ -402,7 +404,7 @@ func UpstreamKeyID(key string) string {
 // AddUpstreamKey adds an Atria key (deduped); returns its id.
 func (c *Config) AddUpstreamKey(key string, weight int, proxy string) string {
 	key = strings.TrimSpace(key)
-	if key == "" {
+	if key == "" || strings.ContainsAny(key, " \t\r\n") {
 		return ""
 	}
 	if weight <= 0 {
@@ -501,11 +503,18 @@ type Watcher struct {
 	cur  *Config
 	cb   func(*Config)
 	stop chan struct{}
+	// skip reports a modtime this process just wrote, so the watcher does not
+	// reload its own save and race the live config.
+	skip func(time.Time) bool
 }
 
 func NewWatcher(path string, cb func(*Config)) *Watcher {
 	return &Watcher{path: path, cb: cb, stop: make(chan struct{})}
 }
+
+// SetSkipReload ignores file changes whose modtime skip reports as our own
+// write. External edits still reload.
+func (w *Watcher) SetSkipReload(skip func(time.Time) bool) { w.skip = skip }
 
 func (w *Watcher) Current() *Config {
 	w.mu.Lock()
@@ -530,6 +539,10 @@ func (w *Watcher) Run(ctx context.Context, initial *Config) {
 		case <-ticker.C:
 			if m := fileMod(w.path); !m.IsZero() && mod != m {
 				mod = m
+				if w.skip != nil && w.skip(m) {
+					slog.Debug("config change is our own write, skip reload", "path", w.path)
+					continue
+				}
 				w.reload()
 			}
 		}

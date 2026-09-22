@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -57,6 +58,7 @@ func main() {
 
 	// SOCKS5 proxy pool.
 	proxies := proxypool.New(toProxyEntries(cfg), cfg.Proxy.Policy, time.Duration(cfg.Proxy.FailCooldown))
+	var proxyMu sync.Mutex
 
 	// Usage metrics.
 	rec := metrics.New(config.ResolvePath(cfg.Metrics.StateFile, ".") + ".usage")
@@ -87,6 +89,15 @@ func main() {
 	})
 
 	srv := server.New(cfg, relayer, pool, proxies, rec, cfgPath)
+	// Panel edits and file reloads both rebuild the live proxy pool. The
+	// relayer holds the pool pointer, so we swap the entries in place.
+	srv.SetProxyRebuilder(func(newCfg *config.Config) {
+		proxyMu.Lock()
+		defer proxyMu.Unlock()
+		next := proxypool.New(toProxyEntries(newCfg), newCfg.Proxy.Policy, time.Duration(newCfg.Proxy.FailCooldown))
+		proxies.Replace(next)
+		slog.Info("proxy pool rebuilt", "proxies", countProxies(newCfg), "policy", newCfg.Proxy.Policy)
+	})
 
 	// Hot reload: settings, relayer config, routes and the key list all follow
 	// config changes (the management panel writes config.yaml too).
@@ -95,6 +106,10 @@ func main() {
 		// Config file is authoritative; reconcile the pool under the same lock
 		// the management API uses, so a reload can't race a live mutation.
 		srv.ApplyReload(newCfg, pool)
+		proxyMu.Lock()
+		reloaded := proxypool.New(toProxyEntries(newCfg), newCfg.Proxy.Policy, time.Duration(newCfg.Proxy.FailCooldown))
+		proxies.Replace(reloaded)
+		proxyMu.Unlock()
 		relayer.Update(relay.Config{
 			BaseURL:        newCfg.Upstream.BaseURL,
 			DefaultModel:   newCfg.Upstream.DefaultModel,
@@ -106,9 +121,6 @@ func main() {
 		})
 		srv.Update(newCfg)
 		metricsEnabled.Store(newCfg.Metrics.Enabled)
-		if countProxies(newCfg) != countProxies(cfg) {
-			slog.Warn("proxy list changed; restart to apply")
-		}
 		cfg = newCfg
 	})
 
@@ -120,6 +132,7 @@ func main() {
 		ReadHeaderTimeout: 30 * time.Second,
 	}
 
+	watcher.SetSkipReload(srv.OwnWrite)
 	go pool.FlushLoop(ctx, time.Duration(cfg.Metrics.FlushEvery))
 	go watcher.Run(ctx, cfg)
 	go proxyHealth(ctx, proxies, cfg)

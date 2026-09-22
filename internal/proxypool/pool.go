@@ -86,11 +86,38 @@ func New(urls []struct {
 	return p
 }
 
+// Replace swaps the live proxy list. In-flight dials keep the entry they
+// already picked; the next dial sees the new list. A nil next clears the pool.
+func (p *Pool) Replace(next *Pool) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if next == nil {
+		p.entries = nil
+		return
+	}
+	next.mu.RLock()
+	defer next.mu.RUnlock()
+	p.entries = next.entries
+	p.policy = next.policy
+	p.failCooldown = next.failCooldown
+	p.rr = 0
+}
+
 // Empty reports whether the pool has no usable proxy (direct connection).
 func (p *Pool) Empty() bool {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return len(p.entries) == 0
+}
+
+// ParseURL validates a socks5 URL. The panel uses it before persisting a
+// proxy list so a bad entry never reaches the live pool.
+func ParseURL(raw string) error {
+	_, _, _, err := parseProxyURL(raw)
+	return err
 }
 
 func parseProxyURL(raw string) (addr, user, pass string, err error) {
@@ -191,8 +218,8 @@ func stableIndex(keyHint string, n int) int {
 	return int(hash % uint64(n))
 }
 
-// NoteFailure marks a proxy URL as failed; after enough failures it is cooled
-// down for failCooldown. Unknown URLs are ignored.
+// NoteFailure marks a proxy URL as failed and cools it down for failCooldown.
+// Unknown URLs are ignored.
 func (p *Pool) NoteFailure(proxyURL string) {
 	if proxyURL == "" {
 		return
@@ -202,6 +229,7 @@ func (p *Pool) NoteFailure(proxyURL string) {
 	for _, e := range p.entries {
 		if e.url == proxyURL {
 			e.failCount++
+			e.healthy = false
 			e.failUntil = time.Now().Add(p.failCooldown)
 			slog.Warn("proxy failure recorded", "url", maskProxy(e.url),
 				"fails", e.failCount, "cooldown", p.failCooldown)
@@ -210,7 +238,7 @@ func (p *Pool) NoteFailure(proxyURL string) {
 	}
 }
 
-// NoteSuccess clears the failure state of a proxy URL.
+// NoteSuccess clears the failure state of a proxy URL and marks it healthy.
 func (p *Pool) NoteSuccess(proxyURL string) {
 	if proxyURL == "" {
 		return
@@ -220,6 +248,7 @@ func (p *Pool) NoteSuccess(proxyURL string) {
 	for _, e := range p.entries {
 		if e.url == proxyURL {
 			e.failCount = 0
+			e.healthy = true
 			e.failUntil = time.Time{}
 			e.successCnt++
 			return
@@ -244,12 +273,17 @@ func dialerFor(rawURL string) (proxy.Dialer, error) {
 // at dial time. When the pool is empty it returns a direct transport. The
 // transport is cached per pool so TCP+TLS connections are reused across
 // requests instead of being re-established on every call.
+//
+// A fresh clone is returned on every call. The cached template keeps idle
+// connections, but its DialContext must not be mutated in place: relay wraps
+// the result with withConnectTimeout, which would otherwise replace the
+// SOCKS5 dialer with a direct one and silently drop the proxy pool.
 func (p *Pool) Transport(keyHint string, onProxy func(string)) *http.Transport {
 	if p == nil || p.Empty() {
 		return baseTransport()
 	}
 	v, _ := p.transportCache.LoadOrStore("__pool__", baseTransport())
-	t := v.(*http.Transport)
+	t := v.(*http.Transport).Clone()
 	t.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 		proxyURL := p.Pick(keyHint)
 		if proxyURL == "" {
@@ -329,7 +363,8 @@ func TransportForURL(rawURL string) *http.Transport {
 }
 
 // HealthCheck pings every proxy through a lightweight TCP connect (via the
-// socks5 dialer to the upstream host) and uncools entries that recover. It is
+// socks5 dialer to the upstream host). A successful dial restores the entry;
+// a failed dial cools it down so the picker stops using a dead node. It is
 // meant to be run on a ticker.
 func (p *Pool) HealthCheck(ctx context.Context, testAddr string) {
 	if p == nil || p.Empty() || testAddr == "" {
@@ -363,6 +398,7 @@ func (p *Pool) HealthCheck(ctx context.Context, testAddr string) {
 				c, err = d.Dial("tcp", testAddr)
 			}
 			if err != nil {
+				p.NoteFailure(u)
 				return
 			}
 			_ = c.Close()
