@@ -227,6 +227,7 @@ func (s *Server) addUpstreamKey(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, errBody("key must start with atr_ and contain no spaces", "bad_request"))
 		return
 	}
+	existed := s.pool.Has(req.Key)
 	id := s.pool.AddKey(req.Key, req.Weight, req.Proxy)
 	if id == "" {
 		writeJSON(w, http.StatusBadRequest, errBody("invalid key: must start with atr_ and contain no spaces", "bad_request"))
@@ -235,7 +236,13 @@ func (s *Server) addUpstreamKey(w http.ResponseWriter, r *http.Request) {
 	if !s.mutateConfig(func(c *config.Config) bool {
 		return c.AddUpstreamKey(req.Key, req.Weight, req.Proxy) != ""
 	}) {
-		writeJSON(w, http.StatusInternalServerError, errBody("config not persisted", "persist_failed"))
+		// The pool insert already happened. Roll it back, otherwise the panel
+		// shows the new key and a failure toast at the same time, and a
+		// restart drops the key because it never reached the config file.
+		if !existed {
+			s.pool.RemoveKey(id)
+		}
+		writeJSON(w, http.StatusInternalServerError, errBody(s.persistErr(), "persist_failed"))
 		return
 	}
 	slog.Info("upstream key added", "id", id, "weight", req.Weight)
@@ -290,8 +297,8 @@ func (s *Server) bulkAddUpstreamKeys(w http.ResponseWriter, r *http.Request) {
 			if !existed {
 				s.pool.RemoveKey(id)
 			}
-			skipped++
-			continue
+			writeJSON(w, http.StatusInternalServerError, errBody(s.persistErr(), "persist_failed"))
+			return
 		}
 		if existed {
 			updated++
@@ -315,8 +322,14 @@ func (s *Server) addAPIKey(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, errBody(err.Error(), "bad_request"))
 		return
 	}
-	if !s.mutateConfig(func(c *config.Config) bool { return c.AddAPIKey(req.Key) }) {
-		writeJSON(w, http.StatusConflict, errBody("empty or duplicate api key", "duplicate"))
+	if errText := s.mutateReason(func(c *config.Config) bool { return c.AddAPIKey(req.Key) }); errText != "" {
+		code := http.StatusConflict
+		kind := "duplicate"
+		if errText != "empty or duplicate" {
+			code = http.StatusInternalServerError
+			kind = "persist_failed"
+		}
+		writeJSON(w, code, errBody(errText, kind))
 		return
 	}
 	slog.Info("downstream api key added", "id", config.UpstreamKeyID(req.Key))
@@ -342,9 +355,11 @@ func (s *Server) mutateConfig(fn func(*config.Config) bool) bool {
 	// Persist before publishing: a failed write would otherwise make the live
 	// pool drift from what survives a restart.
 	if err := cp.Save(s.configPath); err != nil {
-		slog.Error("persist config failed", "err", err)
+		s.notePersistErr(err)
+		slog.Error("persist config failed", "err", err, "path", s.configPath)
 		return false
 	}
+	s.notePersistErr(nil)
 	if st, err := os.Stat(s.configPath); err == nil {
 		s.MarkSaved(st.ModTime())
 	}
@@ -357,6 +372,38 @@ func (s *Server) mutateConfig(fn func(*config.Config) bool) bool {
 		s.rebuild(&cp)
 	}
 	return true
+}
+
+// mutateReason is mutateConfig with a reason the panel can show. An empty
+// return means the change was saved.
+func (s *Server) mutateReason(fn func(*config.Config) bool) string {
+	if s.mutateConfig(fn) {
+		return ""
+	}
+	if msg := s.persistErr(); msg != "" && msg != "保存失败" {
+		return msg
+	}
+	return "empty or duplicate"
+}
+
+func (s *Server) notePersistErr(err error) {
+	if err == nil {
+		s.lastPersistErr.Store("")
+		return
+	}
+	s.lastPersistErr.Store(err.Error())
+}
+
+func (s *Server) persistErr() string {
+	if v := s.lastPersistErr.Load(); v != nil {
+		if msg, ok := v.(string); ok && msg != "" {
+			if strings.Contains(msg, "permission denied") || strings.Contains(msg, "read-only") {
+				return "配置文件不可写，无法保存。请确认 config.yaml 对运行用户可写，Docker 挂载不要使用 :ro"
+			}
+			return "配置没有保存：" + msg
+		}
+	}
+	return "保存失败"
 }
 
 // replaceProxies replaces the SOCKS5 pool from the panel. An empty list

@@ -3,6 +3,8 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -85,6 +87,61 @@ func TestYamlLoadAndEnvOverride(t *testing.T) {
 	}
 	if cfg.Upstream.BaseURL != "https://env.example" {
 		t.Fatalf("env base url override failed: %s", cfg.Upstream.BaseURL)
+	}
+}
+
+func TestSavedConfigKeepsEnvPassword(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("port: 8318\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ATRIA2API_MGMT_KEY", "panel-pass")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ATRIA2API_MGMT_KEY", "")
+	reloaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("saved config must reload without the env password: %v", err)
+	}
+	if reloaded.Management.SecretKey != "panel-pass" {
+		t.Fatalf("password not persisted: %q", reloaded.Management.SecretKey)
+	}
+}
+
+func TestSaveFallsBackWhenRenameIsBusy(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "source.yaml")
+	dst := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(src, []byte("port: 8318\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dst, []byte("old\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mount(src, dst, "", syscall.MS_BIND, ""); err != nil {
+		t.Skipf("bind mount unavailable: %v", err)
+	}
+	t.Cleanup(func() { _ = syscall.Unmount(dst, 0) })
+
+	cfg := Default()
+	cfg.Management.SecretKey = "panel-pass"
+	cfg.APIKeys = []string{"client-bind"}
+	cfg.Upstream.Keys = []UpstreamKey{{Key: "atr_bind", Weight: 1}}
+	if err := cfg.Save(dst); err != nil {
+		t.Fatalf("save through bind mount: %v", err)
+	}
+	raw, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "client-bind") || !strings.Contains(string(raw), "atr_bind") {
+		t.Fatalf("bind-mounted config was not updated: %s", raw)
 	}
 }
 

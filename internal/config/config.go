@@ -495,7 +495,24 @@ func (c *Config) Save(path string) error {
 	if err := os.WriteFile(tmp, b, 0o600); err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	if err := os.Rename(tmp, path); err == nil {
+		return nil
+	}
+	// Docker bind-mounts a single file, and rename into that mount point fails
+	// with EBUSY. Write the validated temp content in place instead.
+	defer os.Remove(tmp)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(b); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return nil
 }
 
 // --- hot reload ----------------------------------------------------------

@@ -116,6 +116,32 @@ func TestUpstreamKeyAddRemove(t *testing.T) {
 	}
 }
 
+func TestUnwritableConfigRollsBackKeys(t *testing.T) {
+	s, _ := mgmtServer(t)
+	// A directory is not a file the server can replace, so the save fails for
+	// root too. This is the same outcome as a Docker :ro mount.
+	blocked := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.Mkdir(blocked, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s.configPath = blocked
+
+	up := mgmtDo(t, s, "POST", "/v0/management/keys", map[string]any{"key": "atr_shouldno"})
+	if up.Code != 500 || !strings.Contains(up.Body.String(), "persist_failed") {
+		t.Fatalf("upstream add must report the save failure: %d %s", up.Code, up.Body.String())
+	}
+	if total, _ := s.pool.Summary(); total != 1 {
+		t.Fatalf("failed upstream add stayed in the pool: %d", total)
+	}
+	down := mgmtDo(t, s, "POST", "/v0/management/api-keys", map[string]any{"key": "client-nope"})
+	if down.Code != 500 || !strings.Contains(down.Body.String(), "persist_failed") {
+		t.Fatalf("downstream add must report the save failure: %d %s", down.Code, down.Body.String())
+	}
+	if n := len(s.cfg.Load().APIKeys); n != 2 {
+		t.Fatalf("failed downstream add changed live keys: %d", n)
+	}
+}
+
 func TestAPIKeyAddTakesEffectImmediately(t *testing.T) {
 	s, _ := mgmtServer(t)
 

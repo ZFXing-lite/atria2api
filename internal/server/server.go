@@ -45,6 +45,9 @@ type Server struct {
 	// reload a copy that dropped the just-applied change when env overrides
 	// are in play, or race the live pool.
 	savedAt atomic.Int64
+	// lastPersistErr is the most recent config save failure, so the panel can
+	// say why an add failed instead of a generic conflict.
+	lastPersistErr atomic.Value
 }
 
 func New(cfg *config.Config, relayer *relay.Relayer, pool *keypool.Pool,
