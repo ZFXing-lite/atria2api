@@ -86,7 +86,7 @@ func TestModelsEndpoint(t *testing.T) {
 func TestHealthAndStatus(t *testing.T) {
 	s, _ := testServer(t)
 	w := do(t, s, "GET", "/healthz", "")
-	if w.Code != 200 || !strings.Contains(w.Body.String(), `"status":"ok"`) {
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"ready":true`) {
 		t.Fatalf("healthz: %d %s", w.Code, w.Body.String())
 	}
 	w = do(t, s, "GET", "/status", "")

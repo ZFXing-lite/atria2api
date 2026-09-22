@@ -149,18 +149,14 @@ func (s *Server) models(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// healthz reports gateway liveness: 200 while at least one upstream key is
-// not permanently disabled, 503 otherwise.
+// healthz reports process liveness. It stays 200 while the process is up so a
+// fresh deploy (panel password set, upstream keys still empty) is not marked
+// failed by Docker and restarted in a loop. Key readiness is "ready".
 func (s *Server) healthz(w http.ResponseWriter, r *http.Request) {
 	total, healthy := s.pool.Summary()
-	if healthy == 0 {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
-			"status": "unhealthy", "keys": total, "healthy": healthy,
-		})
-		return
-	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"status": "ok", "keys": total, "healthy": healthy,
+		"status": "ok", "ready": healthy > 0,
+		"keys": total, "healthy": healthy,
 		"uptime_seconds": time.Since(s.started).Seconds(),
 	})
 }

@@ -121,7 +121,7 @@ rate-limit:
 | `POST /v1/messages` | Anthropic Messages（`x-api-key`） |
 | `POST /v1/responses` | OpenAI Responses |
 | `GET /v1/models` | 固定模型目录 |
-| `GET /healthz` | 存活探针（无可用 key 时 503） |
+| `GET /healthz` | 进程存活探针，始终 200；`ready` 表示是否已有可用上游密钥 |
 | `GET /status` | 脱敏的池状态与用量快照 |
 | `*/v0/management/panel` | Web 管理面板 |
 | `*/v0/management/*` | 运维 API（未设 `remote-management.secret-key` 时返回 404） |
