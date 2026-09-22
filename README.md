@@ -36,8 +36,13 @@ go run ./cmd/server -c config.yaml
 
 ```bash
 docker build -t atria2api .
-docker run -p 8318:8318 -v "$PWD/config.yaml:/app/config.yaml:ro" atria2api
+docker run -p 8318:8318 \
+  -v "$PWD/config.yaml:/app/config.yaml" \
+  -v atria2api-state:/app/state \
+  atria2api
 ```
+
+配置文件必须可写。面板增删 key、改模型、换代理都会回写它；挂成 `:ro` 时这些操作会失败。
 
 然后把客户端指向网关（三种接口同一个地址）：
 
@@ -161,7 +166,7 @@ http://127.0.0.1:8318/v0/management/panel
 docker run -p 8318:8318 \
   -e ATRIA2API_MGMT_KEY=你的面板密码 \
   -e ATRIA2API_ALLOW_REMOTE=1 \
-  -v "$PWD/config.yaml:/app/config.yaml:ro" \
+  -v "$PWD/config.yaml:/app/config.yaml" \
   atria2api
 ```
 

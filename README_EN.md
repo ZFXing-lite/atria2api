@@ -41,7 +41,7 @@ Or with Docker:
 
 ```bash
 docker build -t atria2api .
-docker run -p 8318:8318 -v "$PWD/config.yaml:/app/config.yaml:ro" atria2api
+docker run -p 8318:8318 -v "$PWD/config.yaml:/app/config.yaml" -v atria2api-state:/app/state atria2api
 ```
 
 Then point a client at the gateway (all three interfaces share the same URL):

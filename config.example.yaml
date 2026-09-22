@@ -67,7 +67,7 @@ log:
 # Usage counters + pool state persistence (atomic tmp+rename writes).
 metrics:
   enabled: true
-  state-file: "state.json"
+  state-file: "state/state.json"
   flush-every: 5s
 
 # Management API (/v0/management/*). Empty secret-key disables it (404).
