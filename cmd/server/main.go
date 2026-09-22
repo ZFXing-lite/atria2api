@@ -46,7 +46,7 @@ func main() {
 	setupLogger(cfg)
 
 	if len(cfg.Upstream.Keys) == 0 {
-		slog.Warn("no upstream keys yet; the gateway answers 503 until one is added in the panel or ATRIA2API_KEYS")
+		slog.Info("no upstream keys yet; open the panel and add them, /healthz stays 503 until then")
 	}
 	slog.Info("atria2api starting",
 		"listen", cfg.ListenAddr(), "base-url", cfg.Upstream.BaseURL,

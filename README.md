@@ -24,33 +24,22 @@ Atria API 按账户限速（响应头 `x-rpm-limit` / `x-rpm-remaining`，429 �
 
 ## 快速开始
 
-一条命令即可。没有 `config.yaml` 时程序会按示例自动生成，密钥留空也能启动，面板里再补。
+部署时只需要面板密码。上游密钥、下游密钥和代理都留空，启动后在面板里填。
 
 ```bash
 git clone https://github.com/ZFXing-lite/atria2api
 cd atria2api
-ATRIA2API_KEYS=atr_你的密钥 ATRIA2API_MGMT_KEY=面板密码 go run ./cmd/server
+ATRIA2API_MGMT_KEY=面板密码 docker compose up -d --build
 ```
 
-浏览器打开 `http://127.0.0.1:8318/v0/management/panel`。没带上面两个环境变量也可以先启动，再到面板里添加上游密钥；此时 `/healthz` 是 503，加上密钥后变为 200。
+浏览器打开 `http://服务器IP:8318/v0/management/panel`，用这个密码登录，然后添加上游密钥。没填上游密钥时 `/healthz` 是 503，填上后变为 200。
 
-Docker 同样不需要先手写配置：
+没设 `ATRIA2API_MGMT_KEY` 时进程会直接退出，不会带一个没有密码的面板启动。`config.yaml` 不存在会自动生成，并且必须可写，面板的修改会回写它。
 
-```bash
-ATRIA2API_KEYS=atr_你的密钥 \
-ATRIA2API_API_KEYS=客户端密钥 \
-ATRIA2API_MGMT_KEY=面板密码 \
-ATRIA2API_ALLOW_REMOTE=1 \
-docker compose up -d --build
-```
-
-`config.yaml` 会被自动生成，并且必须保持可写。面板增删密钥、改模型、换代理都会回写它；挂成 `:ro` 时这些操作会失败。
-
-本机不用 Docker、也不想用环境变量时：
+本机不用 Docker：
 
 ```bash
-cp config.example.yaml config.yaml   # 可选，不复制也会自动生成
-go run ./cmd/server -c config.yaml
+ATRIA2API_MGMT_KEY=面板密码 go run ./cmd/server
 ```
 
 然后把客户端指向网关（三种接口同一个地址）：

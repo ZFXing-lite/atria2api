@@ -7,11 +7,8 @@ services:
     ports:
       - "8318:8318"
     environment:
-      # 第一次启动可以不改文件：上游密钥、面板密码、是否允许远程登录都走环境变量。
-      ATRIA2API_KEYS: ${ATRIA2API_KEYS:-}
-      ATRIA2API_API_KEYS: ${ATRIA2API_API_KEYS:-}
-      ATRIA2API_MGMT_KEY: ${ATRIA2API_MGMT_KEY:-}
-      ATRIA2API_ALLOW_REMOTE: ${ATRIA2API_ALLOW_REMOTE:-}
+      # 部署时唯一必填项。没设密码进程会拒绝启动。
+      ATRIA2API_MGMT_KEY: ${ATRIA2API_MGMT_KEY:?set ATRIA2API_MGMT_KEY to the panel password}
     volumes:
       # 没有这个文件时，程序会用示例配置自动生成。必须可写，面板会回写它。
       - ./config.yaml:/app/config.yaml

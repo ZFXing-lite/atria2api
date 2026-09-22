@@ -96,11 +96,18 @@ func TestHealthAndStatus(t *testing.T) {
 	// Key ids must never appear raw; they are hashes.
 }
 
-func TestManagementDisabledByDefault(t *testing.T) {
+func TestManagementDisabledWithoutPassword(t *testing.T) {
 	s, _ := testServer(t)
+	cfg := s.cfg.Load()
+	cfg.Management.SecretKey = ""
+	s.Update(cfg)
 	w := do(t, s, "GET", "/v0/management/keys", "")
 	if w.Code != 404 {
-		t.Fatalf("management must be 404 without secret-key: got %d", w.Code)
+		t.Fatalf("management API must be 404 without secret-key: got %d", w.Code)
+	}
+	page := do(t, s, "GET", "/v0/management/panel", "")
+	if page.Code != 200 {
+		t.Fatalf("panel page should still explain the missing password, got %d", page.Code)
 	}
 }
 

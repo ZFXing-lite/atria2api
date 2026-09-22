@@ -8,15 +8,25 @@ import (
 
 func TestDefaultsAndValidation(t *testing.T) {
 	t.Setenv("ATRIA2API_KEYS", "")
+	t.Setenv("ATRIA2API_MGMT_KEY", "")
+	if _, err := Load(""); err == nil {
+		t.Fatal("startup must refuse to run without a panel password")
+	}
+
+	t.Setenv("ATRIA2API_MGMT_KEY", "panel-pass")
 	empty, err := Load("")
 	if err != nil {
 		t.Fatalf("empty key list must boot so the panel can add the first key: %v", err)
+	}
+	if !empty.Management.AllowRemote {
+		t.Fatal("panel must be reachable after deploy by default")
 	}
 	if len(empty.Upstream.Keys) != 0 {
 		t.Fatalf("expected no keys, got %d", len(empty.Upstream.Keys))
 	}
 
 	t.Setenv("ATRIA2API_KEYS", "atr_a, atr_b")
+	t.Setenv("ATRIA2API_MGMT_KEY", "panel-pass")
 	cfg, err := Load("")
 	if err != nil {
 		t.Fatalf("load: %v", err)
@@ -44,6 +54,7 @@ func TestYamlLoadAndEnvOverride(t *testing.T) {
 	}
 	// env must be cleared or the duplicate-key validation below is masked
 	t.Setenv("ATRIA2API_KEYS", "")
+	t.Setenv("ATRIA2API_MGMT_KEY", "panel-pass")
 	_, err := Load(path)
 	if err == nil {
 		t.Fatal("expected duplicate-key error")
@@ -118,15 +129,15 @@ func contains(haystack, needle string) bool {
 func TestEnvAllowRemoteAndMgmtKey(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "c.yaml")
-	os.WriteFile(p, []byte("host: 127.0.0.1\nport: 8318\nupstream:\n  keys:\n    - key: atr_t\n"), 0o600)
+	os.WriteFile(p, []byte("host: 127.0.0.1\nport: 8318\nupstream:\n  keys:\n    - key: atr_t\nremote-management:\n  secret-key: from-file\n"), 0o600)
 
-	t.Run("off by default", func(t *testing.T) {
+	t.Run("remote on by default", func(t *testing.T) {
 		c, err := Load(p)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if c.Management.AllowRemote {
-			t.Fatal("allow-remote must default to false")
+		if !c.Management.AllowRemote {
+			t.Fatal("allow-remote must default to true so the panel is usable after deploy")
 		}
 	})
 	t.Run("env enables remote and sets key", func(t *testing.T) {

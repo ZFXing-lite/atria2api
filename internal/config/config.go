@@ -184,6 +184,9 @@ func Default() *Config {
 			Enabled:    true,
 			FlushEvery: Duration(5 * time.Second),
 		},
+		// The panel is the setup UI, so a deployed instance must be reachable
+		// from a browser. The password is still required; see normalize.
+		Management: Management{AllowRemote: true},
 	}
 }
 
@@ -284,6 +287,9 @@ func (c *Config) normalize() error {
 	}
 	if c.Metrics.FlushEvery <= 0 {
 		c.Metrics.FlushEvery = Duration(5 * time.Second)
+	}
+	if strings.TrimSpace(c.Management.SecretKey) == "" {
+		return fmt.Errorf("panel password is required: set ATRIA2API_MGMT_KEY or remote-management.secret-key")
 	}
 	return nil
 }

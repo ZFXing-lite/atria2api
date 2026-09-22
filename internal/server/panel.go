@@ -294,8 +294,8 @@ function doLogin() {
     .then(function(r){
       if (!r.ok) {
         var msg = '面板密码不正确';
-        if (r.status === 403) msg = '当前部署没有对公网开放面板。请设置 allow-remote: true，或环境变量 ATRIA2API_ALLOW_REMOTE=1';
-        else if (r.status === 404) msg = '还没有设置面板密码。请配置 secret-key 或 ATRIA2API_MGMT_KEY';
+        if (r.status === 403) msg = '这个地址不允许远程登录面板。请在服务器本机打开，或把 allow-remote 设为 true';
+        else if (r.status === 404) msg = '管理功能未启用';
         else if (r.status === 429) msg = '尝试次数过多，这个 IP 已锁定 15 分钟';
         document.getElementById('loginErr').textContent = msg;
         throw 0;
