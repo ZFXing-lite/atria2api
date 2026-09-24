@@ -1,12 +1,43 @@
-# atria2api
+<p align="center">
+  <img src="https://img.shields.io/badge/atria2api-API%20Gateway-1a73e8?style=flat" alt="atria2api">
+</p>
 
-![GitHub stars](https://img.shields.io/github/stars/ZFXing-lite/atria2api?style=flat-square)
-![License](https://img.shields.io/github/license/ZFXing-lite/atria2api?style=flat-square)
-![Go Version](https://img.shields.io/badge/Go-1.23+-00ADD8?style=flat-square&logo=go)
-![Version](https://img.shields.io/badge/version-1.0.0-blue?style=flat-square)
-![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows%20%7C%20macOS-lightgrey?style=flat-square)
+<h1 align="center">🚪 Atria Dawn Preview API 网关 (atria2api)</h1>
 
-[Atria Dawn Preview API](https://api.atria-asi.ai/docs) 专属网关。单二进制 + 一个 YAML 配置，无数据库，零运行时依赖。把任意 OpenAI / Anthropic / Responses 兼容客户端指向它，填入 `atr_` 账号，剩下的轮询、限速、重试和 SOCKS5 出口全交给网关。
+<p align="center"><strong>Version 1.0.0</strong></p>
+
+<p align="center">
+  <em>单二进制 + 一个 YAML 配置 · 无数据库 · 零运行时依赖 · 把任意 OpenAI / Anthropic / Responses 兼容客户端指向它，填入 atr_ 账号，剩下的轮询、限速、重试和 SOCKS5 出口全交给网关。Please star ⭐</em>
+</p>
+
+<p align="center">
+  <a href="https://github.com/ZFXing-lite/atria2api/stargazers"><img src="https://img.shields.io/github/stars/ZFXing-lite/atria2api?logo=github&label=Stars" alt="GitHub stars"></a>
+  <a href="https://github.com/ZFXing-lite/atria2api/blob/master/LICENSE"><img src="https://img.shields.io/badge/license-MIT-65a30d?style=flat" alt="MIT license"></a>
+  <a href="https://go.dev"><img src="https://img.shields.io/badge/Go-1.23+-00ADD8?logo=go&logoColor=fff" alt="Go"></a>
+  <br>
+  <img src="https://img.shields.io/badge/platform-Linux%20%7C%20Windows%20%7C%20macOS-lightgrey" alt="Platform">
+  <img src="https://img.shields.io/badge/version-1.0.0-blue" alt="Version">
+</p>
+
+<p align="center">
+  <a href="README.md">简体中文</a> | <a href="README_EN.md">English</a>
+</p>
+
+> 部署时只需要面板密码。上游账号、下游密钥和代理都留空，启动后在面板里填。
+
+## Contents
+
+- [安装](#安装)
+- [首次配置](#首次配置)
+- [客户端接入](#客户端接入)
+- [配置文件](#配置文件)
+- [管理面板](#管理面板)
+- [账号池行为](#账号池行为)
+- [接口一览](#接口一览)
+- [流式](#流式)
+- [目录结构](#目录结构)
+- [开发](#开发)
+- [注意事项](#注意事项)
 
 ---
 
@@ -95,7 +126,7 @@ curl -X POST http://127.0.0.1:8318/v1/chat/completions \
 
 ## 配置文件
 
-`config.yaml` 不存在会自动生成，必须可写（面板修改会回写）。环境变量覆盖同名配置项。
+`config.yaml` 不存在会自动生成，必须可写（面板修改会回写）。环境变量覆盖同名配置项。配置文件变更会热重载，无需重启。
 
 ```yaml
 port: 8318
@@ -140,8 +171,6 @@ metrics:
   flush-every: 5s
 ```
 
-配置文件变更会热重载，无需重启。
-
 ---
 
 ## 管理面板
@@ -163,6 +192,20 @@ http://127.0.0.1:8318/v0/management/panel
 - **Token 用量**：按账号与按模型汇总
 
 所有写操作立即生效，并原子回写 `config.yaml`。
+
+### 公网部署
+
+```bash
+docker run -p 8318:8318 \
+  -e ATRIA2API_MGMT_KEY=你的面板密码 \
+  -e ATRIA2API_ALLOW_REMOTE=1 \
+  -v "$PWD/config.yaml:/app/config.yaml" \
+  atria2api
+```
+
+浏览器访问 `http://你的服务器IP:8318/v0/management/panel`，输入密码即可。
+
+**面板密码与下游调用密钥完全独立**：面板密码只用于登录面板和管理 API，下游密钥只用于客户端调用 `/v1/*`，两者互不影响。
 
 ---
 
