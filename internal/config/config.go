@@ -26,11 +26,22 @@ type Config struct {
 	TLS        TLS        `yaml:"tls"`
 	APIKeys    []APIKeyEntry `yaml:"api-keys"`
 	Upstream   Upstream   `yaml:"upstream"`
+	Account    Account    `yaml:"account"`
 	Proxy      Proxy      `yaml:"proxy"`
 	RateLimit  RateLimit  `yaml:"rate-limit"`
 	Log        Log        `yaml:"log"`
 	Metrics    Metrics    `yaml:"metrics"`
 	Management Management `yaml:"remote-management"`
+}
+
+// Account holds the upstream Atria account quota info shown in the panel.
+// The upstream has no API-key-authenticated usage endpoint; these fields are
+// filled manually from the web console (/console/usage) and displayed in the
+// gateway panel for monitoring.
+type Account struct {
+	TokenQuota int64  `yaml:"token-quota" json:"token_quota"`
+	TokenUsed  int64  `yaml:"token-used" json:"token_used"`
+	Formula    string `yaml:"formula" json:"formula"`
 }
 
 type TLS struct {
@@ -636,6 +647,7 @@ func (c *Config) SnapshotJSON() ([]byte, error) {
 		Port         int         `json:"port"`
 		TLS          tlsOut      `json:"tls"`
 		Upstream     upstreamOut `json:"upstream"`
+		Account      Account     `json:"account"`
 		Proxy        proxyOut    `json:"proxy"`
 		RateLimit    rateOut     `json:"rate-limit"`
 		Log          logOut      `json:"log"`
@@ -652,6 +664,7 @@ func (c *Config) SnapshotJSON() ([]byte, error) {
 			ForceModel: c.Upstream.ForceModel, Timeout: c.Upstream.Timeout.String(),
 			ConnectTimeout: c.Upstream.ConnectTimeout.String(), Keys: len(c.Upstream.Keys),
 		},
+		Account: c.Account,
 		Proxy: proxyOut{Policy: c.Proxy.Policy, HealthEvery: c.Proxy.HealthEvery.String(),
 			FailCooldown: c.Proxy.FailCooldown.String(), SOCKS5: proxies},
 		RateLimit: rateOut{

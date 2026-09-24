@@ -548,6 +548,7 @@ func (s *Server) settingsHandler(w http.ResponseWriter, r *http.Request) {
 		"allow_remote":  cfg.Management.AllowRemote,
 		"log_level":     cfg.Log.Level,
 		"tls_enable":    cfg.TLS.Enable,
+		"account":       cfg.Account,
 	})
 }
 
@@ -562,6 +563,9 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		AllowRemote  *bool   `json:"allow_remote"`
 		LogLevel     *string `json:"log_level"`
 		TLSEnable    *bool   `json:"tls_enable"`
+		TokenQuota   *int64  `json:"token_quota"`
+		TokenUsed    *int64  `json:"token_used"`
+		Formula      *string `json:"formula"`
 	}
 	if err := decodeBody(r, &req); err != nil {
 		writeJSON(w, http.StatusBadRequest, errBody(err.Error(), "bad_request"))
@@ -608,6 +612,15 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		if req.TLSEnable != nil {
 			c.TLS.Enable = *req.TLSEnable
+		}
+		if req.TokenQuota != nil {
+			c.Account.TokenQuota = *req.TokenQuota
+		}
+		if req.TokenUsed != nil {
+			c.Account.TokenUsed = *req.TokenUsed
+		}
+		if req.Formula != nil {
+			c.Account.Formula = strings.TrimSpace(*req.Formula)
 		}
 		return true
 	}) {

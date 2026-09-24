@@ -345,6 +345,19 @@ var panelHTML = `<!DOCTYPE html>
   .stat-cell .sc-v.bad { color:var(--red); }
   .stat-cell .sc-v.warn { color:var(--amber); }
 
+  /* ── Account quota bar ── */
+  .account-quota { display:flex; flex-direction:column; gap:10px; padding:4px 0; }
+  .aq-bar-wrap { position:relative; height:28px; background:var(--bg-2); border-radius:var(--radius); overflow:hidden; border:1px solid var(--border-2); }
+  .aq-bar-fill { position:absolute; left:0; top:0; bottom:0; background:linear-gradient(90deg,var(--blue),var(--accent)); border-radius:var(--radius); transition:width .4s ease; }
+  .aq-bar-label { position:absolute; right:10px; top:0; bottom:0; display:flex; align-items:center; font-size:12px; font-weight:700; color:var(--fg); font-variant-numeric:tabular-nums; z-index:1; }
+  .aq-stats { display:grid; grid-template-columns:repeat(4,1fr); gap:8px; }
+  @media (max-width:600px){ .aq-stats{grid-template-columns:repeat(2,1fr);} }
+  .aq-stat { background:var(--panel); border:1px solid var(--border-2); border-radius:var(--radius); padding:8px 10px; display:flex; flex-direction:column; gap:2px; }
+  .aq-k { color:var(--dim-2); font-size:10px; text-transform:uppercase; letter-spacing:.3px; }
+  .aq-v { font-size:16px; font-weight:700; font-variant-numeric:tabular-nums; }
+  .aq-v.ok { color:var(--green); }
+  .aq-formula { color:var(--dim-2); font-size:11px; line-height:1.5; padding:4px 0; }
+
   /* ── Bar chart (request distribution) ── */
   .bar-chart { display:flex; flex-direction:column; gap:6px; margin:8px 0; }
   .bar-row { display:flex; align-items:center; gap:8px; font-size:11px; }
@@ -499,6 +512,22 @@ var panelHTML = `<!DOCTYPE html>
       <span class="muted" style="font-size:11px" id="ovDateHint">显示全部数据</span>
     </div>
     <div class="stat-grid" id="ovStatGrid"></div>
+    <div class="ov-panel" id="ovAccountPanel" style="margin-top:10px;display:none">
+      <div class="panel-title">上游账户额度</div>
+      <div class="account-quota">
+        <div class="aq-bar-wrap">
+          <div class="aq-bar-fill" id="aqBarFill"></div>
+          <span class="aq-bar-label" id="aqBarLabel">0%</span>
+        </div>
+        <div class="aq-stats">
+          <div class="aq-stat"><span class="aq-k">总额度</span><span class="aq-v" id="aqQuota">—</span></div>
+          <div class="aq-stat"><span class="aq-k">已用</span><span class="aq-v" id="aqUsed">—</span></div>
+          <div class="aq-stat"><span class="aq-k">剩余</span><span class="aq-v ok" id="aqRemain">—</span></div>
+          <div class="aq-stat"><span class="aq-k">消耗</span><span class="aq-v" id="aqPct">0%</span></div>
+        </div>
+        <div class="aq-formula" id="aqFormula"></div>
+      </div>
+    </div>
     <div class="ov-panel" style="margin-top:10px">
       <div class="panel-title">Token 用量</div>
       <div class="usage-mini">
@@ -662,6 +691,26 @@ var panelHTML = `<!DOCTYPE html>
                 <option value="sticky-key">按密钥固定</option>
               </select>
               <span class="fg-hint">密钥选取策略</span>
+            </div>
+          </div>
+        </div>
+        <div class="form-group">
+          <div class="fg-title">上游账户额度</div>
+          <div class="fg-body">
+            <div class="fg-item">
+              <label>总额度 (Token Quota)</label>
+              <input id="setTokenQuota" type="number" min="0" placeholder="例如 100000000">
+              <span class="fg-hint">从 Atria web console /console/usage 填入</span>
+            </div>
+            <div class="fg-item">
+              <label>已用 (Token Used)</label>
+              <input id="setTokenUsed" type="number" min="0" placeholder="例如 814289">
+              <span class="fg-hint">从 web console 用量页面填入</span>
+            </div>
+            <div class="fg-item">
+              <label>计费公式</label>
+              <input id="setFormula" placeholder="未缓存输入 × 20% + 输出，每次请求向上取整；缓存输入免费">
+              <span class="fg-hint">计费规则说明（可选）</span>
             </div>
           </div>
         </div>
@@ -829,7 +878,7 @@ function emptyRow(cols, text) {
 
 /* ── Overview: build once, update in place to avoid flicker ── */
 
-function updateOverview(s, usage) {
+function updateOverview(s, usage, st) {
   var p = s.ports || {};
   var upEl = document.getElementById('upstreamLbl');
   if (upEl && upEl.textContent !== (p.upstream || '')) upEl.textContent = p.upstream || '';
@@ -923,6 +972,30 @@ function updateOverview(s, usage) {
   var sgEl = document.getElementById('ovStatGrid');
   if (sgEl && sgEl.innerHTML !== sgHtml) sgEl.innerHTML = sgHtml;
 
+  /* Account quota panel */
+  var acct = (st && st.account) || {};
+  var acEl = document.getElementById('ovAccountPanel');
+  if (acEl) {
+    var quota = acct.token_quota || 0, used = acct.token_used || 0;
+    if (quota > 0) {
+      acEl.style.display = '';
+      var pct = used / quota * 100;
+      var remain = quota - used;
+      var fillEl = document.getElementById('aqBarFill');
+      if (fillEl) fillEl.style.width = Math.min(pct, 100).toFixed(2) + '%';
+      var lblEl = document.getElementById('aqBarLabel');
+      if (lblEl) lblEl.textContent = pct.toFixed(2) + '%';
+      hs('aqQuota', fmtTokens(quota));
+      hs('aqUsed', fmtTokens(used));
+      hs('aqRemain', fmtTokens(remain));
+      hs('aqPct', pct.toFixed(2) + '%');
+      var fEl = document.getElementById('aqFormula');
+      if (fEl) fEl.textContent = acct.formula || '';
+    } else {
+      acEl.style.display = 'none';
+    }
+  }
+
   /* Donut — status code distribution */
   var codes = {};
   epNames.forEach(function(ep) { var c = eps0[ep]; var sc = c.last_status || 0; if (sc) codes[sc] = (codes[sc] || 0) + 1; });
@@ -1004,7 +1077,7 @@ function refresh() {
     api('/v0/management/proxies').catch(function(){ return {proxies:[]}; }),
     api('/v0/management/settings').catch(function(){ return null; })
   ]).then(function(all){
-    updateOverview(all[0], all[3]);
+    updateOverview(all[0], all[3], all[5]);
     renderKeys(all[0], all[1], all[3]);
     renderAPIKeys(all[2]);
     renderProxies(all[4]);
@@ -1234,6 +1307,13 @@ function renderSettings(st) {
   setV('setBaseUrlV', st.base_url || '—');
   setV('setModelV', st.default_model || '—');
   setV('setPolicyV', ({'round-robin':'轮询','random':'随机','sticky-key':'按密钥固定'})[st.proxy_policy] || st.proxy_policy || '—');
+  var acct = st.account || {};
+  var tq = document.getElementById('setTokenQuota');
+  var tu = document.getElementById('setTokenUsed');
+  var sf = document.getElementById('setFormula');
+  if (tq && document.activeElement !== tq) tq.value = acct.token_quota || '';
+  if (tu && document.activeElement !== tu) tu.value = acct.token_used || '';
+  if (sf && document.activeElement !== sf) sf.value = acct.formula || '';
 }
 function changeRefreshRate() {
   var v = parseInt(document.getElementById('setRefreshRate').value, 10);
@@ -1253,6 +1333,12 @@ function saveSettings(e) {
   };
   var baseUrl = document.getElementById('setBaseUrl');
   if (baseUrl && baseUrl.value.trim()) body.base_url = baseUrl.value.trim();
+  var tq = document.getElementById('setTokenQuota');
+  var tu = document.getElementById('setTokenUsed');
+  var sf = document.getElementById('setFormula');
+  if (tq && tq.value.trim()) body.token_quota = parseInt(tq.value.trim(), 10);
+  if (tu && tu.value.trim()) body.token_used = parseInt(tu.value.trim(), 10);
+  if (sf && sf.value.trim()) body.formula = sf.value.trim();
   api('/v0/management/settings', 'PUT', body).then(function(){ toast('已保存'); refresh(); })
     .catch(function(err){ toast('保存失败：' + err, true); });
   return false;
