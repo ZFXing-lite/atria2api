@@ -228,23 +228,36 @@ func (r *Relayer) Handle(w http.ResponseWriter, req *http.Request, kind Kind) {
 		return
 	}
 	code := http.StatusBadGateway
+	errCode := "upstream_unavailable"
 	if lastStatus == 429 {
 		code = http.StatusTooManyRequests
+		errCode = "rate_limited"
 	} else if lastStatus == 401 {
 		code = http.StatusUnauthorized
+		errCode = "invalid_api_key"
+	} else if lastStatus == 502 {
+		code = http.StatusBadGateway
+		errCode = "upstream_bad_gateway"
+	} else if lastStatus == 503 {
+		code = http.StatusServiceUnavailable
+		errCode = "upstream_unavailable"
 	} else if lastStatus > 0 {
 		code = lastStatus
+		errCode = fmt.Sprintf("upstream_%d", lastStatus)
 	}
 	if poolErr != nil {
 		// Every key is disabled or cooling down.
 		code = http.StatusServiceUnavailable
+		errCode = "all_keys_exhausted"
 		lastErr = firstNonEmpty(lastErr,
-			"no upstream key available: all keys are disabled or cooling down")
+			"all upstream keys are disabled or cooling down; try again later")
+	} else if lastStatus == 502 && lastErr == "" {
+		lastErr = "upstream server returned 502 Bad Gateway (temporary upstream failure)"
 	}
 	writeJSON(w, code, map[string]any{
 		"error": map[string]any{
 			"message": firstNonEmpty(lastErr, "upstream request failed"),
-			"type":    "atria2api_error", "code": "upstream_unavailable",
+			"type":    "atria2api_error", "code": errCode,
 		}})
 	r.log.Warn("request failed", "kind", kind, "status", code, "err", lastErr, "took", time.Since(start))
 }

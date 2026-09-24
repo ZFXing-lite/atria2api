@@ -142,6 +142,7 @@ func main() {
 	go pool.FlushLoop(ctx, time.Duration(cfg.Metrics.FlushEvery))
 	go watcher.Run(ctx, cfg)
 	go proxyHealth(ctx, proxies, cfg)
+	go upstreamHealth(ctx, pool, cfg)
 	if cfg.Metrics.Enabled {
 		go rec.FlushLoop(ctx, time.Duration(cfg.Metrics.FlushEvery))
 	}
@@ -257,6 +258,49 @@ func proxyHealth(ctx context.Context, p *proxypool.Pool, cfg *config.Config) {
 			return
 		case <-t.C:
 			p.HealthCheck(ctx, "api.atria-asi.ai:443")
+		}
+	}
+}
+
+// upstreamHealth pings the upstream API every 30s. On failure it cools every
+// non-disabled key for 30s so the pool stops sending traffic until the next
+// probe succeeds. This catches 502/503 outages faster than waiting for client
+// requests to hit them one key at a time.
+func upstreamHealth(ctx context.Context, pool *keypool.Pool, cfg *config.Config) {
+	base := strings.TrimRight(cfg.Upstream.BaseURL, "/")
+	if base == "" {
+		return
+	}
+	probeURL := base + "/v1/models"
+	every := 30 * time.Second
+	coolDur := 30 * time.Second
+	t := time.NewTicker(every)
+	defer t.Stop()
+	client := &http.Client{Timeout: 10 * time.Second}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, probeURL, nil)
+			if err != nil {
+				continue
+			}
+			resp, err := client.Do(req)
+			if err != nil {
+				n := pool.HealthCheckAll(coolDur, "upstream probe: "+err.Error())
+				if n > 0 {
+					slog.Warn("upstream health probe failed", "url", probeURL, "err", err, "keys_cooled", n)
+				}
+				continue
+			}
+			resp.Body.Close()
+			if resp.StatusCode >= 500 {
+				n := pool.HealthCheckAll(coolDur, fmt.Sprintf("upstream probe: HTTP %d", resp.StatusCode))
+				if n > 0 {
+					slog.Warn("upstream health probe got 5xx", "url", probeURL, "status", resp.StatusCode, "keys_cooled", n)
+				}
+			}
 		}
 	}
 }

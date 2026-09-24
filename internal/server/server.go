@@ -194,6 +194,13 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
+		// Only the known API endpoints require downstream auth. Unknown paths
+		// get 404 directly — returning 401 for scanner probes (.env, /key,
+		// /register, …) leaks that a gateway is listening.
+		if !isAPIPath(r.URL.Path) {
+			s.notFound(w, r)
+			return
+		}
 		if !cfg.AuthRequired() {
 			next.ServeHTTP(w, r)
 			return
@@ -207,6 +214,16 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// isAPIPath reports whether p is one of the documented downstream endpoints.
+func isAPIPath(p string) bool {
+	switch p {
+	case "/v1/chat/completions", "/v1/messages", "/v1/messages/count_tokens",
+		"/v1/responses", "/v1/models":
+		return true
+	}
+	return false
 }
 
 func extractToken(r *http.Request) string {

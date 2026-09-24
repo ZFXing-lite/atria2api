@@ -827,6 +827,29 @@ func (p *Pool) Summary() (total, healthy int) {
 	return total, healthy
 }
 
+// HealthCheckAll cools every non-disabled key for d when the upstream is
+// unreachable, so the pool stops sending traffic until the next probe succeeds.
+// Called by the background upstream health goroutine in main.
+func (p *Pool) HealthCheckAll(d time.Duration, reason string) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	now := time.Now()
+	n := 0
+	for _, id := range p.order {
+		e := p.byID[id]
+		if e == nil || e.disabled || e.manualDisabled {
+			continue
+		}
+		e.cool(now, CoolServer, d, reason)
+		n++
+	}
+	if n > 0 {
+		slog.Warn("upstream health check failed; cooling all keys",
+			"keys", n, "until", now.Add(d).Format(time.RFC3339), "reason", reason)
+	}
+	return n
+}
+
 func min(a, b int) int {
 	if a < b {
 		return a
