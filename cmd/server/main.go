@@ -3,12 +3,10 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
 	"net/http"
-	"net/http/pprof"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -146,25 +144,6 @@ func main() {
 	go proxyHealth(ctx, proxies, cfg)
 	if cfg.Metrics.Enabled {
 		go rec.FlushLoop(ctx, time.Duration(cfg.Metrics.FlushEvery))
-	}
-
-	if cfg.Metrics.Enabled {
-		// pprof on a separate localhost port whenever metrics are enabled.
-		go func() {
-			mux := http.NewServeMux()
-			mux.HandleFunc("/debug/pprof/", pprof.Index)
-			mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
-			mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
-			mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
-			pp := &http.Server{Addr: "127.0.0.1:8319", Handler: mux}
-			go func() {
-				<-ctx.Done()
-				_ = pp.Shutdown(context.Background())
-			}()
-			if err := pp.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				slog.Warn("pprof server stopped", "err", err)
-			}
-		}()
 	}
 
 	serveErr := make(chan error, 1)

@@ -227,7 +227,10 @@ func extractToken(r *http.Request) string {
 func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		s.stats.Begin(r.URL.Path)
+		track := strings.HasPrefix(r.URL.Path, "/v1/")
+		if track {
+			s.stats.Begin(r.URL.Path)
+		}
 		rw := &statusWriter{ResponseWriter: w, status: 200}
 		// next recovers panics itself, but if it ever does not the deferred End
 		// keeps the inflight counter from leaking forever.
@@ -236,7 +239,9 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 			if rw.status >= 400 {
 				errMsg = truncateMsg(rw.bodySnippet())
 			}
-			s.stats.End(r.URL.Path, rw.status, time.Since(start), errMsg)
+			if track {
+				s.stats.End(r.URL.Path, rw.status, time.Since(start), errMsg)
+			}
 		}()
 		next.ServeHTTP(rw, r)
 		s.log.Info("http", "method", r.Method, "path", r.URL.Path,

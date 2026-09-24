@@ -34,7 +34,7 @@ func mgmtServer(t *testing.T) (*Server, string) {
 		BaseURL: up.URL, DefaultModel: "Atria-Dawn-Preview", ForceModel: true, Timeout: 10_000_000_000,
 	}, nil)
 
-	cfg := &config.Config{Host: "127.0.0.1", Port: 8318, APIKeys: []string{"gw-orig", "gw-other"}}
+	cfg := &config.Config{Host: "127.0.0.1", Port: 8318, APIKeys: []config.APIKeyEntry{{Key: "gw-orig"}, {Key: "gw-other"}}}
 	cfg.Upstream.BaseURL = up.URL
 	cfg.Upstream.DefaultModel = "Atria-Dawn-Preview"
 	cfg.Upstream.Keys = []config.UpstreamKey{{Key: "atr_orig"}} // matches the live pool
@@ -67,7 +67,7 @@ func TestPanelServed(t *testing.T) {
 	s, _ := mgmtServer(t)
 	w := mgmtDo(t, s, "GET", "/v0/management/panel", nil)
 	body := w.Body.String()
-	if w.Code != 200 || !strings.Contains(body, "控制面板") {
+	if w.Code != 200 || !strings.Contains(body, "atria2api") {
 		t.Fatalf("panel not served: %d %s", w.Code, firstChars(body))
 	}
 }
@@ -352,7 +352,7 @@ func TestPanelPasswordIsolatedFromAPIKeys(t *testing.T) {
 	cfg := *s.cfg.Load()
 	cfg.Management.SecretKey = "panel-pass"
 	cfg.Management.AllowRemote = true
-	cfg.APIKeys = []string{"client-key"}
+	cfg.APIKeys = []config.APIKeyEntry{{Key: "client-key"}}
 	s.Update(&cfg)
 	loginReset("127.0.0.1")
 
@@ -415,7 +415,7 @@ func TestPanelPublicPageRemoteBlocked(t *testing.T) {
 	req.RemoteAddr = "10.0.0.9:1111"
 	w := httptest.NewRecorder()
 	s.Handler().ServeHTTP(w, req)
-	if w.Code != 200 || !strings.Contains(w.Body.String(), "控制面板") {
+	if w.Code != 200 || !strings.Contains(w.Body.String(), "atria2api") {
 		t.Fatalf("panel page must be public, got %d", w.Code)
 	}
 

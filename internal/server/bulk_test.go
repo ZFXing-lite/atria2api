@@ -20,7 +20,7 @@ func bulkServer(t *testing.T) (*Server, string) {
 	pool := keypool.New([]keypool.UpstreamKey{{Key: "atr_old"}}, keypool.Settings{}, "")
 	r := relay.New(pool, nil, relay.Config{BaseURL: "http://up.invalid",
 		DefaultModel: "Atria-Dawn-Preview", ForceModel: true}, nil)
-	cfg := &config.Config{Host: "127.0.0.1", Port: 8318, APIKeys: []string{"gw"}}
+	cfg := &config.Config{Host: "127.0.0.1", Port: 8318, APIKeys: []config.APIKeyEntry{{Key: "gw"}}}
 	cfg.Upstream.BaseURL = "http://up.invalid"
 	cfg.Upstream.DefaultModel = "Atria-Dawn-Preview"
 	cfg.Upstream.Keys = []config.UpstreamKey{{Key: "atr_old"}} // matches the live pool

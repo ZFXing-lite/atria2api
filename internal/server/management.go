@@ -1,6 +1,7 @@
 package server
 
 import (
+	"crypto/rand"
 	"crypto/subtle"
 	"encoding/json"
 	"log/slog"
@@ -88,7 +89,7 @@ func (s *Server) management(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case p == "/endpoints":
 		writeJSON(w, http.StatusOK, map[string]any{"endpoints": []string{
-			"/config", "/keys", "/keys/bulk", "/api-keys", "/usage", "/stats", "/proxies", "/settings", "/panel",
+			"/config", "/keys", "/keys/bulk", "/keys/batch", "/api-keys", "/usage", "/stats", "/proxies", "/settings", "/panel",
 		}})
 	case p == "/config":
 		b, err := cfg.SnapshotJSON()
@@ -106,6 +107,8 @@ func (s *Server) management(w http.ResponseWriter, r *http.Request) {
 		s.addUpstreamKey(w, r)
 	case p == "/keys/bulk" && r.Method == http.MethodPost:
 		s.bulkAddUpstreamKeys(w, r)
+	case p == "/keys/batch" && r.Method == http.MethodPost:
+		s.batchUpstreamKeys(w, r)
 	case strings.HasPrefix(p, "/keys/") && r.Method == http.MethodDelete:
 		id := idFromPath(p)
 		// Mutate config first and persist; then drop from the live pool. The
@@ -184,7 +187,7 @@ func isKnownManagementPath(p string) bool {
 		return strings.HasSuffix(p, "/disable") || strings.HasSuffix(p, "/enable")
 	case strings.HasPrefix(p, "/api-keys/"):
 		return true
-	case p == "/proxies", p == "/settings", p == "/keys", p == "/keys/bulk", p == "/api-keys":
+	case p == "/proxies", p == "/settings", p == "/keys", p == "/keys/bulk", p == "/keys/batch", p == "/api-keys":
 		return true
 	}
 	return false
@@ -313,16 +316,24 @@ func (s *Server) bulkAddUpstreamKeys(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// addAPIKey adds a downstream key clients can use to call this gateway.
+// addAPIKey generates a downstream key in sk-xxxxxx format from a user-supplied name.
 func (s *Server) addAPIKey(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Key string `json:"key"`
+		Name string `json:"name"`
+		Key  string `json:"key"` // optional: explicit key (back-compat for tests)
 	}
 	if err := decodeBody(r, &req); err != nil {
 		writeJSON(w, http.StatusBadRequest, errBody(err.Error(), "bad_request"))
 		return
 	}
-	if errText := s.mutateReason(func(c *config.Config) bool { return c.AddAPIKey(req.Key) }); errText != "" {
+	var key string
+	if k := strings.TrimSpace(req.Key); k != "" {
+		key = k
+	} else {
+		key = genAPIKey()
+	}
+	name := strings.TrimSpace(req.Name)
+	if errText := s.mutateReason(func(c *config.Config) bool { return c.AddAPIKey(key, name) }); errText != "" {
 		code := http.StatusConflict
 		kind := "duplicate"
 		if errText != "empty or duplicate" {
@@ -332,8 +343,79 @@ func (s *Server) addAPIKey(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, code, errBody(errText, kind))
 		return
 	}
-	slog.Info("downstream api key added", "id", config.UpstreamKeyID(req.Key))
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	id := config.UpstreamKeyID(key)
+	slog.Info("downstream api key added", "id", id, "name", name)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "id": id, "key": key, "name": name})
+}
+
+// genAPIKey returns sk- + 32 random hex chars.
+func genAPIKey() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		// Fallback: use time-based pseudo-random (extremely unlikely path).
+		for i := range b {
+			b[i] = byte(time.Now().UnixNano() >> uint(i))
+		}
+	}
+	return "sk-" + hexEncode(b)
+}
+
+func hexEncode(b []byte) string {
+	const hex = "0123456789abcdef"
+	out := make([]byte, len(b)*2)
+	for i, v := range b {
+		out[i*2] = hex[v>>4]
+		out[i*2+1] = hex[v&0xf]
+	}
+	return string(out)
+}
+
+// batchUpstreamKeys performs bulk enable/disable/delete on upstream keys.
+func (s *Server) batchUpstreamKeys(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		IDs    []string `json:"ids"`
+		Action string   `json:"action"`
+	}
+	if err := decodeBody(r, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, errBody(err.Error(), "bad_request"))
+		return
+	}
+	if len(req.IDs) == 0 {
+		writeJSON(w, http.StatusBadRequest, errBody("no ids provided", "bad_request"))
+		return
+	}
+	switch req.Action {
+	case "del":
+		removed := 0
+		for _, id := range req.IDs {
+			if s.mutateConfig(func(c *config.Config) bool { return c.RemoveUpstreamKey(id) }) {
+				s.pool.RemoveKey(id)
+				removed++
+			}
+		}
+		slog.Info("batch delete upstream keys", "count", removed)
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "affected": removed})
+	case "disable":
+		affected := 0
+		for _, id := range req.IDs {
+			if s.pool.Disable(id) {
+				affected++
+			}
+		}
+		slog.Info("batch disable upstream keys", "count", affected)
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "affected": affected})
+	case "enable":
+		affected := 0
+		for _, id := range req.IDs {
+			if s.pool.Enable(id) {
+				affected++
+			}
+		}
+		slog.Info("batch enable upstream keys", "count", affected)
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "affected": affected})
+	default:
+		writeJSON(w, http.StatusBadRequest, errBody("unknown action: use del/disable/enable", "bad_request"))
+	}
 }
 
 // mutateConfig applies fn to a copy of the live config, publishes it to all
@@ -347,7 +429,7 @@ func (s *Server) mutateConfig(fn func(*config.Config) bool) bool {
 	cur := s.cfg.Load()
 	cp := *cur
 	cp.Upstream.Keys = append([]config.UpstreamKey(nil), cur.Upstream.Keys...)
-	cp.APIKeys = append([]string(nil), cur.APIKeys...)
+	cp.APIKeys = append([]config.APIKeyEntry(nil), cur.APIKeys...)
 	cp.Proxy.SOCKS5 = append([]config.ProxyEntry(nil), cur.Proxy.SOCKS5...)
 	if !fn(&cp) {
 		return false
@@ -465,6 +547,9 @@ func (s *Server) settingsHandler(w http.ResponseWriter, r *http.Request) {
 		"default_model": cfg.Upstream.DefaultModel,
 		"force_model":   cfg.Upstream.ForceModel,
 		"proxy_policy":  cfg.Proxy.Policy,
+		"allow_remote":  cfg.Management.AllowRemote,
+		"log_level":     cfg.Log.Level,
+		"tls_enable":    cfg.TLS.Enable,
 	})
 }
 
@@ -476,6 +561,9 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		ForceModel   *bool   `json:"force_model"`
 		ProxyPolicy  *string `json:"proxy_policy"`
 		BaseURL      *string `json:"base_url"`
+		AllowRemote  *bool   `json:"allow_remote"`
+		LogLevel     *string `json:"log_level"`
+		TLSEnable    *bool   `json:"tls_enable"`
 	}
 	if err := decodeBody(r, &req); err != nil {
 		writeJSON(w, http.StatusBadRequest, errBody(err.Error(), "bad_request"))
@@ -508,6 +596,21 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 				return false
 			}
 		}
+		if req.AllowRemote != nil {
+			c.Management.AllowRemote = *req.AllowRemote
+		}
+		if req.LogLevel != nil {
+			lv := strings.ToLower(strings.TrimSpace(*req.LogLevel))
+			switch lv {
+			case "debug", "info", "warn", "error":
+				c.Log.Level = lv
+			default:
+				return false
+			}
+		}
+		if req.TLSEnable != nil {
+			c.TLS.Enable = *req.TLSEnable
+		}
 		return true
 	}) {
 		writeJSON(w, http.StatusBadRequest, errBody("invalid settings or config not persisted", "bad_request"))
@@ -525,7 +628,6 @@ func (s *Server) statsHandler(w http.ResponseWriter, r *http.Request) {
 		"ports": map[string]any{
 			"http":          cfg.ListenAddr(),
 			"tls":           cfg.TLS.Enable,
-			"pprof":         "127.0.0.1:8319",
 			"auth_required": cfg.AuthRequired(),
 			"mgmt_remote":   cfg.Management.AllowRemote,
 			"upstream":      cfg.Upstream.BaseURL,

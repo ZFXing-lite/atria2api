@@ -13,6 +13,14 @@ import (
 	"github.com/ZFXing-lite/atria2api/internal/relay"
 )
 
+func apiKeysFromStrings(keys []string) []config.APIKeyEntry {
+	out := make([]config.APIKeyEntry, len(keys))
+	for i, k := range keys {
+		out[i] = config.APIKeyEntry{Key: k}
+	}
+	return out
+}
+
 func testServer(t *testing.T, apiKeys ...string) (*Server, *keypool.Pool) {
 	t.Helper()
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -28,7 +36,7 @@ func testServer(t *testing.T, apiKeys ...string) (*Server, *keypool.Pool) {
 		Timeout: 10_000_000_000,
 	}, nil)
 
-	cfg := &config.Config{Host: "", Port: 8318, APIKeys: apiKeys}
+	cfg := &config.Config{Host: "", Port: 8318, APIKeys: apiKeysFromStrings(apiKeys)}
 	cfg.Upstream.DefaultModel = "Atria-Dawn-Preview"
 	return New(cfg, r, pool, nil, metrics.New(""), "config.yaml"), pool
 }

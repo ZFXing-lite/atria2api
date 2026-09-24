@@ -24,7 +24,7 @@ type Config struct {
 	Host       string     `yaml:"host"`
 	Port       int        `yaml:"port"`
 	TLS        TLS        `yaml:"tls"`
-	APIKeys    []string   `yaml:"api-keys"`
+	APIKeys    []APIKeyEntry `yaml:"api-keys"`
 	Upstream   Upstream   `yaml:"upstream"`
 	Proxy      Proxy      `yaml:"proxy"`
 	RateLimit  RateLimit  `yaml:"rate-limit"`
@@ -45,6 +45,12 @@ type UpstreamKey struct {
 	Key    string `yaml:"key"`
 	Weight int    `yaml:"weight"`
 	Proxy  string `yaml:"proxy"` // optional per-key proxy override (URL or "none")
+}
+
+// APIKeyEntry is one downstream key clients use to call this gateway.
+type APIKeyEntry struct {
+	Key  string `yaml:"key" json:"key"`
+	Name string `yaml:"name" json:"name"`
 }
 
 // Upstream describes the single Atria API endpoint. The base URL is shared by
@@ -309,7 +315,7 @@ func (c *Config) UpstreamKeysFlat() []string {
 // AuthRequired reports whether downstream api-keys gate access.
 func (c *Config) AuthRequired() bool {
 	for _, k := range c.APIKeys {
-		if strings.TrimSpace(k) != "" {
+		if strings.TrimSpace(k.Key) != "" {
 			return true
 		}
 	}
@@ -323,7 +329,7 @@ func (c *Config) IsAuthorized(token string) bool {
 		return true
 	}
 	for _, k := range c.APIKeys {
-		if subtleEqual(strings.TrimSpace(k), token) {
+		if subtleEqual(strings.TrimSpace(k.Key), token) {
 			return true
 		}
 	}
@@ -361,7 +367,9 @@ func applyEnv(c *Config) error {
 		}
 	}
 	if v := strings.TrimSpace(get("ATRIA2API_API_KEYS")); v != "" {
-		c.APIKeys = splitList(v)
+		for _, k := range splitList(v) {
+			c.APIKeys = append(c.APIKeys, APIKeyEntry{Key: k})
+		}
 	}
 	if v := strings.TrimSpace(get("ATRIA2API_PROXIES")); v != "" {
 		for _, u := range splitList(v) {
@@ -439,25 +447,25 @@ func (c *Config) RemoveUpstreamKey(id string) bool {
 	return false
 }
 
-// AddAPIKey adds a downstream (client) key, deduped.
-func (c *Config) AddAPIKey(key string) bool {
+// AddAPIKey adds a downstream (client) key with a name, deduped by key.
+func (c *Config) AddAPIKey(key, name string) bool {
 	key = strings.TrimSpace(key)
 	if key == "" {
 		return false
 	}
 	for _, k := range c.APIKeys {
-		if strings.TrimSpace(k) == key {
+		if strings.TrimSpace(k.Key) == key {
 			return false
 		}
 	}
-	c.APIKeys = append(c.APIKeys, key)
+	c.APIKeys = append(c.APIKeys, APIKeyEntry{Key: key, Name: strings.TrimSpace(name)})
 	return true
 }
 
 // RemoveAPIKey removes a downstream key by its id.
 func (c *Config) RemoveAPIKey(id string) bool {
 	for i, k := range c.APIKeys {
-		if UpstreamKeyID(strings.TrimSpace(k)) == id {
+		if UpstreamKeyID(strings.TrimSpace(k.Key)) == id {
 			c.APIKeys = append(c.APIKeys[:i], c.APIKeys[i+1:]...)
 			return true
 		}
@@ -465,15 +473,15 @@ func (c *Config) RemoveAPIKey(id string) bool {
 	return false
 }
 
-// APIKeysMasked returns downstream keys with their ids, never the raw value.
+// APIKeysMasked returns downstream keys with their ids, names and masked values.
 func (c *Config) APIKeysMasked() []map[string]string {
 	out := make([]map[string]string, 0, len(c.APIKeys))
 	for _, k := range c.APIKeys {
-		k = strings.TrimSpace(k)
-		if k == "" {
+		key := strings.TrimSpace(k.Key)
+		if key == "" {
 			continue
 		}
-		out = append(out, map[string]string{"id": UpstreamKeyID(k), "key": mask(k)})
+		out = append(out, map[string]string{"id": UpstreamKeyID(key), "key": mask(key), "name": k.Name})
 	}
 	return out
 }
@@ -634,7 +642,7 @@ func (c *Config) SnapshotJSON() ([]byte, error) {
 		Metrics      metricsOut  `json:"metrics"`
 		Management   mgmtOut     `json:"remote-management"`
 		KeysMasked   []outKey    `json:"upstream-keys-masked"`
-		APIKeys      []string    `json:"api-keys-masked"`
+		APIKeys      []APIKeyMasked `json:"api-keys-masked"`
 		AuthRequired bool        `json:"auth-required"`
 	}{
 		Host: c.Host, Port: c.Port,
@@ -709,12 +717,20 @@ type mgmtOut struct {
 	SecretKeySet bool `json:"secret-key-set"`
 }
 
-// APIKeysMaskedPlain returns masked downstream keys (values only).
-func (c *Config) APIKeysMaskedPlain() []string {
-	out := make([]string, 0, len(c.APIKeys))
+// APIKeyMasked is one masked downstream key for the snapshot JSON.
+type APIKeyMasked struct {
+	ID   string `json:"id"`
+	Key  string `json:"key"`
+	Name string `json:"name"`
+}
+
+// APIKeysMaskedPlain returns masked downstream keys with id and name.
+func (c *Config) APIKeysMaskedPlain() []APIKeyMasked {
+	out := make([]APIKeyMasked, 0, len(c.APIKeys))
 	for _, k := range c.APIKeys {
-		if k = strings.TrimSpace(k); k != "" {
-			out = append(out, mask(k))
+		key := strings.TrimSpace(k.Key)
+		if key != "" {
+			out = append(out, APIKeyMasked{ID: UpstreamKeyID(key), Key: mask(key), Name: k.Name})
 		}
 	}
 	return out
