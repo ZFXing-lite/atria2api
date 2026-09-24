@@ -356,6 +356,8 @@ var panelHTML = `<!DOCTYPE html>
   @media (max-width: 600px) { .usage-mini { grid-template-columns:1fr; } }
   .usage-mini table { min-width:0; font-size:10.5px; }
   .usage-mini th, .usage-mini td { padding:4px 4px; }
+  .usage-mini .scroll { max-height:200px; overflow-y:auto; overflow-x:auto; -webkit-overflow-scrolling:touch; }
+  .usage-mini .chart-zone { margin-bottom:8px; max-height:180px; overflow-y:auto; }
 
   /* ── Donut chart ── */
   .donut-wrap { display:flex; align-items:center; gap:12px; }
@@ -512,6 +514,7 @@ var panelHTML = `<!DOCTYPE html>
       <div class="usage-mini">
         <div>
           <div class="subhead" style="margin-top:0">按密钥</div>
+          <div class="bar-chart chart-zone" id="usageKeysChart"></div>
           <div class="scroll">
             <table class="slim"><thead><tr><th>编号</th><th>请求</th><th>输入</th><th>输出</th><th>错误</th></tr></thead>
               <tbody id="usageKeysBody"></tbody></table>
@@ -519,6 +522,7 @@ var panelHTML = `<!DOCTYPE html>
         </div>
         <div>
           <div class="subhead" style="margin-top:0">按模型</div>
+          <div class="bar-chart chart-zone" id="usageModelsChart"></div>
           <div class="scroll">
             <table class="slim"><thead><tr><th>模型</th><th>请求</th><th>输入</th><th>输出</th></tr></thead>
               <tbody id="usageModelsBody"></tbody></table>
@@ -889,12 +893,23 @@ function updateOverview(s, usage) {
     if (ovEl.innerHTML !== barHtml2) ovEl.innerHTML = barHtml2;
   }
 
-  /* Overview stat grid (4 cells) */
+  /* Token totals for stat grid */
+  var totIn = 0, totOut = 0;
+  if (usage && usage.keys) {
+    Object.keys(usage.keys).forEach(function(id) {
+      var k = usage.keys[id];
+      totIn += k.prompt_tokens || 0;
+      totOut += k.completion_tokens || 0;
+    });
+  }
+  /* Overview stat grid (6 cells) */
   var sgHtml = '';
   sgHtml += '<div class="stat-cell"><div class="sc-k">总请求</div><div class="sc-v">' + totalReq + '</div></div>';
   sgHtml += '<div class="stat-cell"><div class="sc-k">总错误</div><div class="sc-v ' + (totalErr ? 'bad' : 'ok') + '">' + totalErr + '</div></div>';
   sgHtml += '<div class="stat-cell"><div class="sc-k">错误率</div><div class="sc-v ' + (parseFloat(errRate) > 5 ? 'bad' : 'ok') + '">' + errRate + '%</div></div>';
   sgHtml += '<div class="stat-cell"><div class="sc-k">接口数</div><div class="sc-v">' + epNames.length + '</div></div>';
+  sgHtml += '<div class="stat-cell"><div class="sc-k">输入Token</div><div class="sc-v">' + fmtTokens(totIn) + '</div></div>';
+  sgHtml += '<div class="stat-cell"><div class="sc-k">输出Token</div><div class="sc-v">' + fmtTokens(totOut) + '</div></div>';
   var sgEl = document.getElementById('ovStatGrid');
   if (sgEl && sgEl.innerHTML !== sgHtml) sgEl.innerHTML = sgHtml;
 
@@ -1316,18 +1331,54 @@ function renderUsage(u) {
   if (!u || !u.keys) {
     document.getElementById('usageKeysBody').innerHTML = emptyRow(5, '用量统计未开启');
     document.getElementById('usageModelsBody').innerHTML = emptyRow(4, '—');
+    var kc0 = document.getElementById('usageKeysChart'); if (kc0) kc0.innerHTML = '';
+    var mc0 = document.getElementById('usageModelsChart'); if (mc0) mc0.innerHTML = '';
     return;
   }
-  var rows = Object.keys(u.keys).map(function(id){
+  var keyEntries = Object.keys(u.keys).map(function(id){
     var k = u.keys[id];
-    return '<tr><td class="mono">' + esc(id) + '</td><td class="num">' + k.requests + '</td>'
+    return {id: id, req: k.requests || 0};
+  });
+  keyEntries.sort(function(a, b) { return b.req - a.req; });
+  /* 按密钥条形图 */
+  var kcEl = document.getElementById('usageKeysChart');
+  if (kcEl) {
+    var top = keyEntries.slice(0, 10);
+    var maxR = 1; top.forEach(function(e) { if (e.req > maxR) maxR = e.req; });
+    var kcHtml = top.length ? top.map(function(e) {
+      var pct = e.req / maxR * 100;
+      return '<div class="bar-row"><span class="bar-label">' + esc(e.id) + '</span><div class="bar-track"><div class="bar-fill" style="width:' + pct + '%"></div></div><span class="bar-num">' + e.req + '</span></div>';
+    }).join('') : '<div class="muted" style="font-size:11px;padding:4px">还没有用量</div>';
+    if (kcEl.innerHTML !== kcHtml) kcEl.innerHTML = kcHtml;
+  }
+  /* 按密钥表格 */
+  var rows = keyEntries.map(function(e) {
+    var k = u.keys[e.id];
+    return '<tr><td class="mono">' + esc(e.id) + '</td><td class="num">' + k.requests + '</td>'
       + '<td class="num">' + fmtTokens(k.prompt_tokens) + '</td><td class="num">' + fmtTokens(k.completion_tokens) + '</td>'
       + '<td class="num ' + (k.errors ? 'err' : '') + '">' + k.errors + '</td></tr>';
   }).join('');
   document.getElementById('usageKeysBody').innerHTML = rows || emptyRow(5, '还没有用量');
-  var models = Object.keys(u.models || {}).map(function(m){
+  /* 按模型条形图 */
+  var modelEntries = Object.keys(u.models || {}).map(function(m){
     var v = u.models[m];
-    return '<tr><td class="mono">' + esc(m) + '</td><td class="num">' + v.requests + '</td>'
+    return {m: m, req: v.requests || 0};
+  });
+  modelEntries.sort(function(a, b) { return b.req - a.req; });
+  var mcEl = document.getElementById('usageModelsChart');
+  if (mcEl) {
+    var topM = modelEntries.slice(0, 10);
+    var maxM = 1; topM.forEach(function(e) { if (e.req > maxM) maxM = e.req; });
+    var mcHtml = topM.length ? topM.map(function(e) {
+      var pct = e.req / maxM * 100;
+      return '<div class="bar-row"><span class="bar-label">' + esc(e.m) + '</span><div class="bar-track"><div class="bar-fill" style="width:' + pct + '%"></div></div><span class="bar-num">' + e.req + '</span></div>';
+    }).join('') : '<div class="muted" style="font-size:11px;padding:4px">还没有用量</div>';
+    if (mcEl.innerHTML !== mcHtml) mcEl.innerHTML = mcHtml;
+  }
+  /* 按模型表格 */
+  var models = modelEntries.map(function(e) {
+    var v = u.models[e.m];
+    return '<tr><td class="mono">' + esc(e.m) + '</td><td class="num">' + v.requests + '</td>'
       + '<td class="num">' + fmtTokens(v.prompt_tokens) + '</td><td class="num">' + fmtTokens(v.completion_tokens) + '</td></tr>';
   }).join('');
   document.getElementById('usageModelsBody').innerHTML = models || emptyRow(4, '还没有用量');
