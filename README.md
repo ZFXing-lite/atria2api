@@ -1,56 +1,77 @@
 # atria2api
 
-[English](README_EN.md) | 简体中文
+![GitHub stars](https://img.shields.io/github/stars/ZFXing-lite/atria2api?style=flat-square)
+![License](https://img.shields.io/github/license/ZFXing-lite/atria2api?style=flat-square)
+![Go Version](https://img.shields.io/badge/Go-1.23+-00ADD8?style=flat-square&logo=go)
+![Version](https://img.shields.io/badge/version-1.0.0-blue?style=flat-square)
+![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows%20%7C%20macOS-lightgrey?style=flat-square)
 
-[Atria Dawn Preview API](https://api.atria-asi.ai/docs) 的专属网关。把任意
-OpenAI / Anthropic / Responses 兼容客户端指向它，填入一个或多个 `atr_` key，
-剩下的 key 轮询、限速处理、重试和 SOCKS5 出口都交给网关。
+[Atria Dawn Preview API](https://api.atria-asi.ai/docs) 专属网关。单二进制 + 一个 YAML 配置，无数据库，零运行时依赖。把任意 OpenAI / Anthropic / Responses 兼容客户端指向它，填入 `atr_` 账号，剩下的轮询、限速、重试和 SOCKS5 出口全交给网关。
 
-沿用 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)、
-[autoclaw2api](https://github.com/ZFXing-lite/autoclaw2api)、
-[workbuddy2api](https://github.com/Sliverkiss/workbuddy2api) 的成熟模式：
-单二进制 + 一个 YAML 配置，无数据库，零运行时依赖。
+---
 
-## 为什么需要
+## 安装
 
-Atria API 按账户限速（响应头 `x-rpm-limit` / `x-rpm-remaining`，429 时带
-`Retry-After`），三种接口共用同一个 base URL。本网关：
-
-- 在多个 key 之间轮询，一个账户的限额用尽不会让你的客户端停摆；
-- 读取文档里的限速头，让 key 在本分钟窗口内主动休息，而不是撞 429；
-- 可重试的失败（429 / 5xx / 传输错误）自动换 key 重试，但 400 类客户端错误
-  原样回传、流式开始后绝不换号；
-- 可让全部上游流量走 SOCKS5 代理池。
-
-## 快速开始
-
-部署时只需要面板密码。上游密钥、下游密钥和代理都留空，启动后在面板里填。
+### 方式一：Docker Compose（推荐）
 
 ```bash
-git clone https://github.com/ZFXing-lite/atria2api
+git clone https://github.com/ZFXing-lite/atria2api.git
 cd atria2api
-ATRIA2API_MGMT_KEY=面板密码 docker compose up -d --build
+ATRIA2API_MGMT_KEY=你的面板密码 docker compose up -d --build
 ```
 
-浏览器打开 `http://服务器IP:8318/v0/management/panel`，用这个密码登录，然后添加上游密钥。没填上游密钥时 `/healthz` 是 503，填上后变为 200。
+浏览器打开 `http://服务器IP:8318/v0/management/panel`，用密码登录，在面板里添加上游账号。
 
-没设 `ATRIA2API_MGMT_KEY` 时进程会直接退出，不会带一个没有密码的面板启动。`config.yaml` 不存在会自动生成，并且必须可写，面板的修改会回写它。
-
-本机不用 Docker：
+### 方式二：Docker Run
 
 ```bash
-ATRIA2API_MGMT_KEY=面板密码 go run ./cmd/server
+docker run -d -p 8318:8318 \
+  -e ATRIA2API_MGMT_KEY=你的面板密码 \
+  -e ATRIA2API_ALLOW_REMOTE=1 \
+  -v "$PWD/config.yaml:/app/config.yaml" \
+  --name atria2api atria2api
 ```
 
-然后把客户端指向网关（三种接口同一个地址）：
+### 方式三：本机编译运行
 
 ```bash
-export OPENAI_API_KEY=客户端密钥
-curl -X POST http://127.0.0.1:8318/v1/chat/completions \
-  -H "Authorization: Bearer $OPENAI_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"Atria-Dawn-Preview","messages":[{"role":"user","content":"hi"}]}'
+git clone https://github.com/ZFXing-lite/atria2api.git
+cd atria2api
+go build -ldflags="-s -w" -o atria2api ./cmd/server
+ATRIA2API_MGMT_KEY=你的面板密码 ./atria2api -c config.yaml
 ```
+
+Windows：
+
+```powershell
+go build -ldflags="-s -w" -o atria2api.exe ./cmd/server
+$env:ATRIA2API_MGMT_KEY = "你的面板密码"
+.\atria2api.exe -c config.yaml
+```
+
+### 方式四：go run 直接跑
+
+```bash
+ATRIA2API_MGMT_KEY=你的面板密码 go run ./cmd/server
+```
+
+---
+
+## 首次配置
+
+1. 启动后浏览器访问 `http://127.0.0.1:8318/v0/management/panel`
+2. 输入面板密码登录
+3. 在「上游账号」页面添加 `atr_` 开头的账号
+4. 在「系统设置」页面填写默认模型（如 `Atria-Dawn-Preview`）
+5. 客户端指向网关地址即可开始使用
+
+没填上游账号时 `/healthz` 返回 `ready: false`，填上后变为 `ready: true`。
+
+---
+
+## 客户端接入
+
+三种接口共用同一个地址：
 
 | 客户端 | Base URL | 接口 |
 | --- | --- | --- |
@@ -58,12 +79,23 @@ curl -X POST http://127.0.0.1:8318/v1/chat/completions \
 | Anthropic SDK / Claude Code | `http://host:8318` | `/v1/messages`（`x-api-key`） |
 | Codex / Qoder | `http://host:8318/v1` | `/v1/responses` |
 
+curl 示例：
+
+```bash
+export OPENAI_API_KEY=你的下游密钥
+curl -X POST http://127.0.0.1:8318/v1/chat/completions \
+  -H "Authorization: Bearer $OPENAI_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"Atria-Dawn-Preview","messages":[{"role":"user","content":"hi"}]}'
+```
+
 `GET /v1/models` 返回固定的 `Atria-Dawn-Preview` 条目。
 
-## 配置
+---
 
-全部配置在 `config.yaml` 里（环境变量覆盖：`ATRIA2API_KEYS`、`ATRIA2API_API_KEYS`、
-`ATRIA2API_PROXIES`、`ATRIA2API_BASE_URL`、`ATRIA2API_PORT`……）。配置文件变更会热重载。
+## 配置文件
+
+`config.yaml` 不存在会自动生成，必须可写（面板修改会回写）。环境变量覆盖同名配置项。
 
 ```yaml
 port: 8318
@@ -97,23 +129,54 @@ rate-limit:
   max-retries: 3                     # 单请求跨 key 重试次数
   retry-on: [429, 500, 502, 503, 504]
   backoff: 1s                        # 退避基数，指数增长 ±25% 抖动
+
+remote-management:
+  allow-remote: true                 # 允许远程访问面板
+  secret-key: "你的面板密码"
+
+metrics:
+  enabled: true
+  state-file: state/state.json
+  flush-every: 5s
 ```
 
-## key 池行为
+配置文件变更会热重载，无需重启。
 
-- **选号**：先洗牌，按有效权重（配置权重按观测到的剩余 RPM 衰减）排序，截取 top 5
-  后加权随机，权重相同时用 LRU 打破平局。全部冷却中时兜底选"最快恢复"的那个。
-- **冷却**用或门汇总到一个到期时间戳：冷却期间再次撞 429 不会叠加惩罚。429 认
-  `Retry-After`（封顶 10m），5xx 用 `cooldown-5xx`，连续错误触发熔断，有界指数退避
-  （10m、20m、40m……封顶 6h）。
-- **401** 永久停用该 key（按文档，401 表示 key 无效或已吊销），可通过管理 API 或
-  重启重新启用。
-- **传输层失败**（代理挂了、超时）只把 key 临时降级出池 `err-cooldown`，不记在
-  key 账上。
-- **持久化**：池状态与用量计数原子写入 `state.json`（tmp + rename，0600），每隔
-  几秒合并落盘，重启自动恢复。
+---
 
-## 接口
+## 管理面板
+
+浏览器打开：
+
+```
+http://127.0.0.1:8318/v0/management/panel
+```
+
+零依赖单文件页面，每 5 秒自动刷新，支持：
+
+- **概览**：状态、总请求、错误率、上游账号数、代理数、默认模型
+- **上游账号池**：实时查看每个账号的状态/冷却原因/到期时间/RPM 余量/进行中/成功失败计数，一键禁用、启用、删除，表单实时添加新账号（权重 + 代理覆盖）；**批量导入**支持粘贴多行或上传 .txt
+- **下游调用密钥**：实时增删客户端访问本网关用的密钥，删除即刻失效
+- **接口调用统计**：每个 `/v1/` 路径的请求数、错误数、进行中、最近状态码与最近错误
+- **网关设置**：默认模型、代理选择策略、上游 Base URL，保存后立即生效
+- **代理池**：每个 SOCKS5 节点的健康/失败/成功计数；按行粘贴 `socks5://` 地址即可整池替换，留空保存则改为直连
+- **Token 用量**：按账号与按模型汇总
+
+所有写操作立即生效，并原子回写 `config.yaml`。
+
+---
+
+## 账号池行为
+
+- **选号**：先洗牌，按有效权重排序，截取 top 5 后加权随机，权重相同时用 LRU 打破平局。全部冷却中时兜底选"最快恢复"的那个
+- **冷却**用或门汇总到一个到期时间戳：冷却期间再次撞 429 不会叠加惩罚。429 认 `Retry-After`（封顶 10m），5xx 用 `cooldown-5xx`，连续错误触发熔断，有界指数退避（10m、20m、40m……封顶 6h）
+- **401** 永久停用该账号（按文档，401 表示账号无效或已吊销），可通过管理 API 或重启重新启用
+- **传输层失败**（代理挂了、超时）只把账号临时降级出池 `err-cooldown`，不记在账号上
+- **持久化**：池状态与用量计数原子写入 `state.json`（tmp + rename，0600），每隔几秒合并落盘，重启自动恢复
+
+---
+
+## 接口一览
 
 | 路径 | 说明 |
 | --- | --- |
@@ -121,100 +184,53 @@ rate-limit:
 | `POST /v1/messages` | Anthropic Messages（`x-api-key`） |
 | `POST /v1/responses` | OpenAI Responses |
 | `GET /v1/models` | 固定模型目录 |
-| `GET /healthz` | 进程存活探针，始终 200；`ready` 表示是否已有可用上游密钥 |
+| `GET /healthz` | 进程存活探针，始终 200；`ready` 表示是否已有可用上游账号 |
 | `GET /status` | 脱敏的池状态与用量快照 |
 | `*/v0/management/panel` | Web 管理面板 |
-| `*/v0/management/*` | 运维 API（未设 `remote-management.secret-key` 时返回 404） |
+| `*/v0/management/*` | 运维 API（需 `remote-management.secret-key`） |
 
-## 管理面板
-
-设置 `remote-management.secret-key` 后，浏览器打开：
-
-```
-http://127.0.0.1:8318/v0/management/panel
-```
-
-面板是零依赖单文件页面，每 2.5 秒自动刷新，支持：
-
-- **概览**：监听端口、TLS、pprof 端口、上游地址、默认模型、可用 key 数、代理数、鉴权状态
-- **上游 key 池**：实时查看每个 key 的状态/冷却原因/到期时间/RPM 余量/进行中/成功失败计数，
-  一键禁用、启用、删除，表单实时添加新 key（权重 + 代理覆盖）；
-  **批量导入**支持粘贴多行或上传 .txt（每行一条 key，空行和 `#` 注释自动忽略、自动去重）
-- **下游调用 key**：实时增删客户端访问本网关用的 key，**删除即刻失效**
-- **接口调用统计**：每个路径的请求数、错误数、进行中、最近状态码与最近错误
-- **网关设置**：默认模型、是否强制改写请求模型、代理选择策略，保存后立即生效
-- **代理池**：每个 SOCKS5 节点的健康/失败/成功计数；面板里按行粘贴 `socks5://` 地址即可整池替换，留空保存则改为直连，不必重启
-- **Token 用量**：按 key 与按模型汇总
-
-所有写操作立即生效，并原子回写 config.yaml（注意：回写会丢失文件里的注释）。
-面板自己写回的文件不会再被热重载当成外部修改重放一遍。
-新增的上游 key 必须以 `atr_` 开头；格式不对的行在批量导入里会被跳过，不会进池。
-登录连续失败 4 次后锁定 15 分钟，到期后正确密码可以再次登录。
-管理 API 默认只允许本机访问，需要远程访问设 `remote-management.allow-remote: true`。
-管理密钥错误 4 次后该来源 IP 被锁定 15 分钟；密钥用常量时间比较，且 `GET /keys/x/disable`
-这类变更端点只接受 `POST`（GET 链接无法误触发）。
-面板返回的配置信息只含掩码（`atr_****ey`、代理 `socks5://***@host:port`、`secret-key-set` 布尔值），不含任何明文密钥。
-
-### 公网部署面板
-
-面板页面本身是公开 HTML，任何人都能打开登录页；但所有数据接口都要密码，
-且默认只接受本机访问。公网开放只需两步：
-
-```bash
-docker run -p 8318:8318 \
-  -e ATRIA2API_MGMT_KEY=你的面板密码 \
-  -e ATRIA2API_ALLOW_REMOTE=1 \
-  -v "$PWD/config.yaml:/app/config.yaml" \
-  atria2api
-```
-
-然后浏览器访问 `http://你的服务器IP:8318/v0/management/panel`，输入密码即可。
-等价的配置文件写法是 `remote-management: {allow-remote: true, secret-key: 你的面板密码}`。
-
-**面板密码与下游调用 key 完全独立**：
-
-- 面板密码（`remote-management.secret-key` / `ATRIA2API_MGMT_KEY`）只用于登录面板和管理 API
-- 下游调用 key（`api-keys` / `ATRIA2API_API_KEYS`）只用于客户端调用 `/v1/*`
-- 下游 key 登不上面板，面板密码也调不了 `/v1/*`，两者互不影响，删除/修改一侧不动另一侧
-
-公网开放前的安全清单：密码足够长（登录限速只能拖慢暴破）；上 TLS 或放在反代后面
-（否则密码明文过网）；确认 `allow-remote: true` 只在你确实需要时开启。
-
-管理 API（默认仅允许回环访问）：
-
-```bash
-curl -H "Authorization: Bearer $MGMT_KEY" http://127.0.0.1:8318/v0/management/keys
-curl -X POST -H "Authorization: Bearer $MGMT_KEY" \
-  http://127.0.0.1:8318/v0/management/keys/<id>/disable
-curl -X POST -H "Authorization: Bearer $MGMT_KEY" \
-  http://127.0.0.1:8318/v0/management/keys/<id>/enable
-```
-
-key 永远不会出现在日志或管理 API 里，只有一个稳定的掩码哈希 id。
+---
 
 ## 流式
 
-SSE 响应逐块透传并按块 flush（带 `X-Accel-Buffering: no`，nginx 不会缓冲），
-等首 token 期间发送 SSE 注释心跳。响应头只在收到上游第一个块之后才提交，
-所以"首字节前"的上游失败仍能换 key 重试；流式过程中的失败降级为 SSE error
-事件，而不是掐断连接。
+SSE 响应逐块透传并按块 flush（带 `X-Accel-Buffering: no`，nginx 不会缓冲），等首 token 期间发送 SSE 注释心跳。响应头只在收到上游第一个块之后才提交，所以"首字节前"的上游失败仍能换账号重试；流式过程中的失败降级为 SSE error 事件，而不是掐断连接。
+
+---
+
+## 目录结构
+
+```
+atria2api/
+├── cmd/server/main.go          # 入口
+├── internal/
+│   ├── config/                 # YAML 配置加载与热重载
+│   ├── keypool/                # 上游账号池（轮询/冷却/重试）
+│   ├── proxypool/              # SOCKS5 代理池
+│   ├── relay/                  # 上游请求转发
+│   ├── metrics/                # Token 用量记录
+│   └── server/                 # HTTP 路由与管理面板
+├── config.yaml                 # 配置文件
+├── docker-compose.yml
+└── Dockerfile
+```
+
+---
 
 ## 开发
 
 ```bash
-go test ./...          # 单元测试 + 对 mock 上游的端到端测试
+go test ./...                              # 单元测试 + 端到端测试
 go build -ldflags="-s -w" -o atria2api ./cmd/server
 ```
 
-## 注意事项与限制
+---
 
-- Atria 的限速是**账户级**的、名下所有 key 共享，所以只有当你的 key 来自不同账户
-  时轮询才能真正分散限速；它抬不动单个账户的 RPM。
-- `Atria-Dawn-Preview` 是纯文本模型（256K 上下文）；网关原样转发请求体，不做
-  多模态转码。
-- 输出长度上限（`max_completion_tokens` / `max_tokens` / `max_output_tokens`，
-  1–65536）由上游强制执行。
+## 注意事项
 
-## 许可
+- Atria 的限速是**账户级**的，名下所有账号共享，所以只有当你的账号来自不同账户时轮询才能真正分散限速
+- `Atria-Dawn-Preview` 是纯文本模型（256K 上下文）；网关原样转发请求体，不做多模态转码
+- 输出长度上限（`max_completion_tokens` / `max_tokens` / `max_output_tokens`，1–65536）由上游强制执行
 
-MIT。
+---
+
+MIT
