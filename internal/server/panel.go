@@ -489,26 +489,6 @@ var panelHTML = `<!DOCTYPE html>
       <span class="muted" style="font-size:11px" id="ovDateHint">显示全部数据</span>
     </div>
     <div class="stat-grid" id="ovStatGrid"></div>
-    <div class="ov-grid">
-      <div class="ov-panel">
-        <div class="panel-title">请求分布</div>
-        <div class="bar-chart" id="ovBarChart"></div>
-      </div>
-      <div class="ov-panel">
-        <div class="panel-title">状态码分布</div>
-        <div class="donut-wrap" id="ovDonut"></div>
-      </div>
-    </div>
-    <div class="ov-grid" style="margin-top:10px">
-      <div class="ov-panel">
-        <div class="panel-title">账号调用量 Top 5</div>
-        <div class="bar-chart" id="ovKeyChart"></div>
-      </div>
-      <div class="ov-panel">
-        <div class="panel-title">最近活动</div>
-        <div class="activity-list" id="activityList"></div>
-      </div>
-    </div>
     <div class="ov-panel" style="margin-top:10px">
       <div class="panel-title">Token 用量</div>
       <div class="usage-mini">
@@ -528,6 +508,26 @@ var panelHTML = `<!DOCTYPE html>
               <tbody id="usageModelsBody"></tbody></table>
           </div>
         </div>
+      </div>
+    </div>
+    <div class="ov-grid">
+      <div class="ov-panel">
+        <div class="panel-title">请求分布</div>
+        <div class="bar-chart" id="ovBarChart"></div>
+      </div>
+      <div class="ov-panel">
+        <div class="panel-title">状态码分布</div>
+        <div class="donut-wrap" id="ovDonut"></div>
+      </div>
+    </div>
+    <div class="ov-grid" style="margin-top:10px">
+      <div class="ov-panel">
+        <div class="panel-title">账号调用量 Top 5</div>
+        <div class="bar-chart" id="ovKeyChart"></div>
+      </div>
+      <div class="ov-panel">
+        <div class="panel-title">最近活动</div>
+        <div class="activity-list" id="activityList"></div>
       </div>
     </div>
     <div class="ov-panel" style="margin-top:10px">
