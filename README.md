@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://img.shields.io/badge/atria2api-API%20Gateway-1a73e8?style=flat" alt="atria2api">
+  <img src="https://img.shields.io/badge/atria2api-API%20Gateway-1a73e8?style=for-the-badge" alt="atria2api">
 </p>
 
 <h1 align="center">🚪 Atria Dawn Preview API 网关 (atria2api)</h1>
@@ -17,6 +17,7 @@
   <br>
   <img src="https://img.shields.io/badge/platform-Linux%20%7C%20Windows%20%7C%20macOS-lightgrey" alt="Platform">
   <img src="https://img.shields.io/badge/version-1.0.0-blue" alt="Version">
+  <img src="https://img.shields.io/badge/dependencies-zero-success" alt="Zero deps">
 </p>
 
 <p align="center">
@@ -25,9 +26,12 @@
 
 > 部署时只需要面板密码。上游账号、下游密钥和代理都留空，启动后在面板里填。
 
+> 面板密码与下游调用密钥完全独立：面板密码只用于登录面板和管理 API，下游密钥只用于客户端调用 `/v1/*`，两者互不影响。
+
 ## Contents
 
-- [安装](#安装)
+- [What this is](#what-this-is)
+- [Install](#install)
 - [首次配置](#首次配置)
 - [客户端接入](#客户端接入)
 - [配置文件](#配置文件)
@@ -41,7 +45,30 @@
 
 ---
 
-## 安装
+## What this is
+
+**atria2api** 是一个单二进制 API 网关，把 Atria Dawn Preview 的账号池、限速、重试和代理管理打包成一个进程，对外暴露 OpenAI / Anthropic / Responses 三套接口。
+
+| 你得到 | 它做什么 |
+|---|---|
+| **单二进制** | Go 编译，无数据库、无运行时依赖，一个 YAML 配置走天下 |
+| **三接口合一** | `/v1/chat/completions`、`/v1/messages`、`/v1/responses` 共用同一端口 |
+| **账号池** | 加权轮询、LRU 打破平局、429/5xx 冷却、401 永久停用、跨账号重试 |
+| **管理面板** | 零依赖单文件页面，实时增删账号、代理、密钥，原子回写配置 |
+| **SOCKS5 代理池** | 按行粘贴地址整池替换，健康检查，每账号可独立覆盖代理 |
+
+---
+
+## Install
+
+四种方式，选你有的环境。
+
+| 你有的 | 去哪 |
+|---|---|
+| Docker Compose | [方式一](#方式一docker-compose推荐) |
+| Docker 但不用 Compose | [方式二](#方式二docker-run) |
+| Go 工具链 | [方式三](#方式三本机编译运行) |
+| 只想快速跑一下 | [方式四](#方式四go-run-直接跑) |
 
 ### 方式一：Docker Compose（推荐）
 
@@ -85,6 +112,14 @@ $env:ATRIA2API_MGMT_KEY = "你的面板密码"
 ```bash
 ATRIA2API_MGMT_KEY=你的面板密码 go run ./cmd/server
 ```
+
+### 安装后：三步上线
+
+1. 浏览器访问 `http://127.0.0.1:8318/v0/management/panel`
+2. 输入面板密码登录
+3. 在「上游账号」页面添加 `atr_` 开头的账号，在「系统设置」填默认模型（如 `Atria-Dawn-Preview`）
+
+没填上游账号时 `/healthz` 返回 `ready: false`，填上后变为 `ready: true`。
 
 ---
 
@@ -205,8 +240,6 @@ docker run -p 8318:8318 \
 
 浏览器访问 `http://你的服务器IP:8318/v0/management/panel`，输入密码即可。
 
-**面板密码与下游调用密钥完全独立**：面板密码只用于登录面板和管理 API，下游密钥只用于客户端调用 `/v1/*`，两者互不影响。
-
 ---
 
 ## 账号池行为
@@ -275,5 +308,7 @@ go build -ldflags="-s -w" -o atria2api ./cmd/server
 - 输出长度上限（`max_completion_tokens` / `max_tokens` / `max_output_tokens`，1–65536）由上游强制执行
 
 ---
+
+Thanks to the [LINUX DO](https://linux.do) community.
 
 MIT
