@@ -357,7 +357,14 @@ var panelHTML = `<!DOCTYPE html>
   .usage-mini table { min-width:0; font-size:10.5px; }
   .usage-mini th, .usage-mini td { padding:4px 4px; }
   .usage-mini .scroll { max-height:200px; overflow-y:auto; overflow-x:auto; -webkit-overflow-scrolling:touch; }
-  .usage-mini .chart-zone { margin-bottom:8px; max-height:180px; overflow-y:auto; }
+  .usage-mini .chart-zone { margin-bottom:8px; }
+
+  /* ── Treemap (token usage) ── */
+  .treemap-zone { position:relative; width:100%; height:170px; margin-bottom:8px; overflow:hidden; border-radius:5px; background:var(--panel-2); }
+  .tm-cell { position:absolute; display:flex; flex-direction:column; justify-content:center; align-items:center; border:1px solid var(--bg); box-sizing:border-box; overflow:hidden; transition:opacity .2s; }
+  .tm-cell:hover { opacity:0.8; }
+  .tm-label { font-size:9px; color:#fff; text-align:center; padding:0 3px; word-break:break-all; line-height:1.15; max-height:2.3em; overflow:hidden; opacity:0.92; }
+  .tm-num { font-size:13px; color:#fff; font-weight:700; margin-top:2px; }
 
   /* ── Donut chart ── */
   .donut-wrap { display:flex; align-items:center; gap:12px; }
@@ -494,7 +501,7 @@ var panelHTML = `<!DOCTYPE html>
       <div class="usage-mini">
         <div>
           <div class="subhead" style="margin-top:0">按密钥</div>
-          <div class="bar-chart chart-zone" id="usageKeysChart"></div>
+          <div class="treemap-zone" id="usageKeysChart"></div>
           <div class="scroll">
             <table class="slim"><thead><tr><th>编号</th><th>请求</th><th>输入</th><th>输出</th><th>错误</th></tr></thead>
               <tbody id="usageKeysBody"></tbody></table>
@@ -502,7 +509,7 @@ var panelHTML = `<!DOCTYPE html>
         </div>
         <div>
           <div class="subhead" style="margin-top:0">按模型</div>
-          <div class="bar-chart chart-zone" id="usageModelsChart"></div>
+          <div class="treemap-zone" id="usageModelsChart"></div>
           <div class="scroll">
             <table class="slim"><thead><tr><th>模型</th><th>请求</th><th>输入</th><th>输出</th></tr></thead>
               <tbody id="usageModelsBody"></tbody></table>
@@ -1327,6 +1334,49 @@ function renderProxies(res) {
   }
 }
 
+var TM_COLORS = ['#1a73e8','#10b981','#f59e0b','#ef4444','#8b5cf6','#ec4899','#14b8a6','#f97316','#6366f1','#84cc16','#06b6d4','#a855f7'];
+
+/* 二叉切分 treemap：递归按面积比例切矩形，方向随宽高比切换 */
+function treemap(items, x, y, w, h) {
+  if (!items.length) return [];
+  if (items.length === 1) return [{x:x, y:y, w:w, h:h, label:items[0].label, value:items[0].value}];
+  var total = 0; items.forEach(function(i){ total += i.value; });
+  if (total <= 0) return [];
+  var half = total / 2, acc = 0, split = 0;
+  for (var i = 0; i < items.length; i++) { acc += items[i].value; if (acc >= half) { split = i + 1; break; } }
+  if (split < 1) split = 1; if (split >= items.length) split = items.length - 1;
+  var g1 = items.slice(0, split), g2 = items.slice(split);
+  var t1 = 0; g1.forEach(function(i){ t1 += i.value; });
+  var frac = t1 / total, rects = [];
+  if (w >= h) {
+    var w1 = w * frac;
+    rects = rects.concat(treemap(g1, x, y, w1, h));
+    rects = rects.concat(treemap(g2, x + w1, y, w - w1, h));
+  } else {
+    var h1 = h * frac;
+    rects = rects.concat(treemap(g1, x, y, w, h1));
+    rects = rects.concat(treemap(g2, x, y + h1, w, h - h1));
+  }
+  return rects;
+}
+
+function renderTreemap(elId, entries, labelFn) {
+  var el = document.getElementById(elId);
+  if (!el) return;
+  if (!entries.length) { el.innerHTML = '<div class="muted" style="font-size:11px;padding:4px">还没有用量</div>'; return; }
+  var top = entries.slice(0, 12);
+  var items = top.map(function(e){ return {label: labelFn(e), value: e.req}; });
+  items.sort(function(a,b){ return b.value - a.value; });
+  var rects = treemap(items, 0, 0, 100, 100);
+  var html = rects.map(function(r, i) {
+    var color = TM_COLORS[i % TM_COLORS.length];
+    var showLabel = r.w > 12 && r.h > 12;
+    var inner = showLabel ? '<div class="tm-label">' + esc(r.label) + '</div><div class="tm-num">' + r.value + '</div>' : '';
+    return '<div class="tm-cell" style="left:' + r.x + '%;top:' + r.y + '%;width:' + r.w + '%;height:' + r.h + '%;background:' + color + '">' + inner + '</div>';
+  }).join('');
+  if (el.innerHTML !== html) el.innerHTML = html;
+}
+
 function renderUsage(u) {
   if (!u || !u.keys) {
     document.getElementById('usageKeysBody').innerHTML = emptyRow(5, '用量统计未开启');
@@ -1340,17 +1390,8 @@ function renderUsage(u) {
     return {id: id, req: k.requests || 0};
   });
   keyEntries.sort(function(a, b) { return b.req - a.req; });
-  /* 按密钥条形图 */
-  var kcEl = document.getElementById('usageKeysChart');
-  if (kcEl) {
-    var top = keyEntries.slice(0, 10);
-    var maxR = 1; top.forEach(function(e) { if (e.req > maxR) maxR = e.req; });
-    var kcHtml = top.length ? top.map(function(e) {
-      var pct = e.req / maxR * 100;
-      return '<div class="bar-row"><span class="bar-label">' + esc(e.id) + '</span><div class="bar-track"><div class="bar-fill" style="width:' + pct + '%"></div></div><span class="bar-num">' + e.req + '</span></div>';
-    }).join('') : '<div class="muted" style="font-size:11px;padding:4px">还没有用量</div>';
-    if (kcEl.innerHTML !== kcHtml) kcEl.innerHTML = kcHtml;
-  }
+  /* 按密钥树状图 */
+  renderTreemap('usageKeysChart', keyEntries, function(e){ return e.id; });
   /* 按密钥表格 */
   var rows = keyEntries.map(function(e) {
     var k = u.keys[e.id];
@@ -1359,22 +1400,13 @@ function renderUsage(u) {
       + '<td class="num ' + (k.errors ? 'err' : '') + '">' + k.errors + '</td></tr>';
   }).join('');
   document.getElementById('usageKeysBody').innerHTML = rows || emptyRow(5, '还没有用量');
-  /* 按模型条形图 */
+  /* 按模型树状图 */
   var modelEntries = Object.keys(u.models || {}).map(function(m){
     var v = u.models[m];
     return {m: m, req: v.requests || 0};
   });
   modelEntries.sort(function(a, b) { return b.req - a.req; });
-  var mcEl = document.getElementById('usageModelsChart');
-  if (mcEl) {
-    var topM = modelEntries.slice(0, 10);
-    var maxM = 1; topM.forEach(function(e) { if (e.req > maxM) maxM = e.req; });
-    var mcHtml = topM.length ? topM.map(function(e) {
-      var pct = e.req / maxM * 100;
-      return '<div class="bar-row"><span class="bar-label">' + esc(e.m) + '</span><div class="bar-track"><div class="bar-fill" style="width:' + pct + '%"></div></div><span class="bar-num">' + e.req + '</span></div>';
-    }).join('') : '<div class="muted" style="font-size:11px;padding:4px">还没有用量</div>';
-    if (mcEl.innerHTML !== mcHtml) mcEl.innerHTML = mcHtml;
-  }
+  renderTreemap('usageModelsChart', modelEntries, function(e){ return e.m; });
   /* 按模型表格 */
   var models = modelEntries.map(function(e) {
     var v = u.models[e.m];
