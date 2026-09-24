@@ -195,15 +195,12 @@ func isKnownManagementPath(p string) bool {
 
 // validAtriaKey is the panel/API gate. Keys already in config.yaml are not
 // re-checked, so a hand-edited file can still boot; new keys typed into the
-// panel must look like atr_ credentials.
+// panel just need to be non-empty, no whitespace, reasonable length.
 func validAtriaKey(key string) bool {
-	if len(key) < 5 || len(key) > 512 {
+	if len(key) < 3 || len(key) > 512 {
 		return false
 	}
-	if strings.ContainsAny(key, " \t\r\n") {
-		return false
-	}
-	return strings.HasPrefix(key, "atr_")
+	return !strings.ContainsAny(key, " \t\r\n")
 }
 
 func proxyStatusList(p *proxypool.Pool) []proxypool.Status {
@@ -227,13 +224,13 @@ func (s *Server) addUpstreamKey(w http.ResponseWriter, r *http.Request) {
 	}
 	req.Key = strings.TrimSpace(req.Key)
 	if !validAtriaKey(req.Key) {
-		writeJSON(w, http.StatusBadRequest, errBody("key must start with atr_ and contain no spaces", "bad_request"))
+		writeJSON(w, http.StatusBadRequest, errBody("key 不能为空、不能含空格、长度 3-512", "bad_request"))
 		return
 	}
 	existed := s.pool.Has(req.Key)
 	id := s.pool.AddKey(req.Key, req.Weight, req.Proxy)
 	if id == "" {
-		writeJSON(w, http.StatusBadRequest, errBody("invalid key: must start with atr_ and contain no spaces", "bad_request"))
+		writeJSON(w, http.StatusBadRequest, errBody("key 无效：不能为空或含空格", "bad_request"))
 		return
 	}
 	if !s.mutateConfig(func(c *config.Config) bool {

@@ -566,7 +566,7 @@ var panelHTML = `<!DOCTYPE html>
       <form onsubmit="return addKey(event)">
         <div class="subhead" style="margin-top:0">添加上游账号</div>
         <div class="row">
-          <input id="newKey" class="grow" placeholder="atr_ 开头的上游账号" autocomplete="off">
+          <input id="newKey" class="grow" placeholder="上游账号密钥" autocomplete="off">
           <input id="newWeight" class="narrow" type="number" value="1" min="1" title="权重" inputmode="numeric">
         </div>
         <div class="row">
@@ -576,8 +576,8 @@ var panelHTML = `<!DOCTYPE html>
       </form>
       <details id="bulkBox">
         <summary>批量导入</summary>
-        <p class="hint">每行一条密钥。空行和 # 开头的行会忽略，重复的会去掉。</p>
-        <textarea id="bulkText" placeholder="atr_xxx&#10;atr_yyy&#10;# 注释会被忽略"></textarea>
+        <p class="hint">每行一条密钥。也支持 email------password----atr_xxx 格式，自动提取 atr_ 密钥。空行和 # 开头的行会忽略，重复的会去掉。</p>
+        <textarea id="bulkText" placeholder="每行一个账号密钥，或 email------password----atr_xxx&#10;# 开头的行会被忽略"></textarea>
         <div class="row">
           <input type="file" id="bulkFile" accept=".txt,text/plain" class="grow">
           <button class="btn sm" type="button" onclick="loadBulkFile()">读取文件</button>
@@ -1109,7 +1109,16 @@ function parseBulkText(text) {
   var seen = {}, out = [];
   (text || '').split(/\r?\n/).forEach(function(line){
     var k = line.trim();
-    if (!k || k.charAt(0) === '#' || seen[k]) return;
+    if (!k || k.charAt(0) === '#') return;
+    // 支持 email------password----atr_xxx 格式：优先提取 atr_ 开头的密钥段
+    var idx = k.indexOf('atr_');
+    if (idx >= 0) {
+      k = k.slice(idx).trim();
+    } else if (k.indexOf('----') >= 0) {
+      var parts = k.split('----');
+      k = parts[parts.length - 1].trim();
+    }
+    if (!k || seen[k]) return;
     seen[k] = true;
     out.push(k);
   });
