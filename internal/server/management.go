@@ -52,6 +52,7 @@ func (s *Server) management(w http.ResponseWriter, r *http.Request) {
 	p := strings.TrimPrefix(r.URL.Path, "/v0/management")
 	if p == "" || p == "/" || p == "/panel" {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(panelHTML))
 		return
