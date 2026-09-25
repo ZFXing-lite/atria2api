@@ -883,7 +883,7 @@ function updateOverview(s, usage, st) {
   var upEl = document.getElementById('upstreamLbl');
   if (upEl && upEl.textContent !== (p.upstream || '')) upEl.textContent = p.upstream || '';
   var lbl = document.getElementById('refreshLbl');
-  var txt = AUTO ? '2.5s 刷新' : '已暂停';
+  var txt = AUTO ? '2s 刷新' : '已暂停';
   if (lbl.textContent !== txt) lbl.textContent = txt;
 
   /* Hero stats */
@@ -976,7 +976,7 @@ function updateOverview(s, usage, st) {
   var acct = (st && st.account) || {};
   var acEl = document.getElementById('ovAccountPanel');
   if (acEl) {
-    var quota = acct.token_quota || 0;
+    var quota = (acct.token_quota || 0) * (st.keys_total || 1);
     var used = totIn + totOut;
     if (quota > 0) {
       acEl.style.display = '';
@@ -1093,7 +1093,7 @@ function refresh() {
 function start() {
   refresh();
   if (TIMER) clearInterval(TIMER);
-  TIMER = setInterval(function(){ if (AUTO) refresh(); }, 5000);
+  TIMER = setInterval(function(){ if (AUTO) refresh(); }, 2000);
 }
 function toggleAuto() {
   AUTO = !AUTO;
