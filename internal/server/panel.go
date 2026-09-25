@@ -21,7 +21,7 @@ var panelHTML = `<!DOCTYPE html>
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>atria2api v2.4</title>
+<title>atria2api v2.5</title>
 <style id="daisyui-css">` + daisyuiCSS + `</style>
 <style id="daisyui-themes">` + daisyuiThemesCSS + `</style>
 <style>
@@ -457,7 +457,7 @@ var panelHTML = `<!DOCTYPE html>
     <div class="sf-row"><span class="sf-dot" id="sfDot" style="background:var(--green)"></span><span id="sfStatus">运行中</span></div>
     <div class="sf-row"><span>密钥</span><span class="sf-num" id="sfKeys">0/0</span></div>
     <div class="sf-row"><span>代理</span><span class="sf-num" id="sfProxies">直连</span></div>
-    <div class="sf-row" style="font-size:10px;opacity:0.5">v2.4</div>
+    <div class="sf-row" style="font-size:10px;opacity:0.5">v2.5</div>
   </div>
 </aside>
 <div class="sidebar-overlay" id="sidebarOverlay" onclick="toggleSidebar()"></div>
@@ -1070,31 +1070,40 @@ function resetDate() {
   refresh();
 }
 
+var REFRESHING = false, SLOW_TICK = 0, _slowCache = [null, null, null];
+
 function refresh() {
-  Promise.all([
+  if (REFRESHING) return;
+  REFRESHING = true;
+  SLOW_TICK++;
+  var doSlow = (SLOW_TICK % 5 === 1);
+  var reqs = [
     api('/v0/management/stats'),
     api('/v0/management/keys'),
-    api('/v0/management/api-keys'),
+    doSlow ? api('/v0/management/api-keys') : Promise.resolve(_slowCache[0]),
     api('/v0/management/usage').catch(function(){ return {enabled:false}; }),
-    api('/v0/management/proxies').catch(function(){ return {proxies:[]}; }),
-    api('/v0/management/settings').catch(function(){ return null; })
-  ]).then(function(all){
+    doSlow ? api('/v0/management/proxies').catch(function(){ return {proxies:[]}; }) : Promise.resolve(_slowCache[1]),
+    doSlow ? api('/v0/management/settings').catch(function(){ return null; }) : Promise.resolve(_slowCache[2])
+  ];
+  Promise.all(reqs).then(function(all){
+    if (doSlow) _slowCache = [all[2], all[4], all[5]];
     updateOverview(all[0], all[3], all[5]);
     renderKeys(all[0], all[1], all[3], all[5]);
-    renderAPIKeys(all[2]);
-    renderProxies(all[4]);
+    if (doSlow) renderAPIKeys(all[2]);
+    if (doSlow) renderProxies(all[4]);
     renderUsage(all[3]);
-    renderSettings(all[5]);
+    if (doSlow) renderSettings(all[5]);
     var dot = document.getElementById('healthDot');
     var cls = 'dot' + (all[0].keys_healthy > 0 ? '' : ' off');
     if (dot.className !== cls) dot.className = cls;
-  }).catch(function(e){ toast('刷新失败：' + e, true); });
+    REFRESHING = false;
+  }).catch(function(e){ toast('刷新失败：' + e, true); REFRESHING = false; });
 }
 
 function start() {
   refresh();
   if (TIMER) clearInterval(TIMER);
-  TIMER = setInterval(function(){ if (AUTO) refresh(); }, 2000);
+  TIMER = setInterval(function(){ if (AUTO && !document.hidden) refresh(); }, 2000);
 }
 function toggleAuto() {
   AUTO = !AUTO;
