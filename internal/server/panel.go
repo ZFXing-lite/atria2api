@@ -1129,7 +1129,7 @@ function renderKeys(s, keys, usage) {
       + '<td class="mono">' + esc(k.id) + '</td><td class="num">' + esc(k.weight) + '</td>'
       + '<td class="muted" title="' + attr(k.proxy || '') + '">' + proxyLbl + '</td>'
       + '<td>' + pill(k.state) + '</td><td class="muted">' + esc(k.reason || '—') + '</td><td>' + until + '</td>'
-      + '<td class="num">' + (k.rpm_limit ? (k.rpm_remaining + '/' + k.rpm_limit) : '—') + '</td>'
+      + '<td class="num">' + (k.rpm_limit ? (k.rpm_remaining + '/' + k.rpm_limit) : (total > 0 ? fmtTokens(total) : '—')) + '</td>'
       + '<td class="num">' + esc(k.inflight) + '</td>'
       + '<td class="num">' + esc(k.success_count) + '/<span class="' + (k.error_count ? 'err' : '') + '">' + esc(k.error_count) + '</span></td>'
       + '<td class="num">' + (u.requests || 0) + '</td>'
