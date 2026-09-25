@@ -540,6 +540,10 @@ func (s *Server) replaceProxies(w http.ResponseWriter, r *http.Request) {
 // settingsHandler returns the knobs the panel can edit without a restart.
 func (s *Server) settingsHandler(w http.ResponseWriter, r *http.Request) {
 	cfg := s.cfg.Load()
+	acct := cfg.Account
+	if acct.Formula == "" || !isASCII(acct.Formula) {
+		acct.Formula = "未缓存输入 × 20% + 输出，缓存输入免费"
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"base_url":      cfg.Upstream.BaseURL,
 		"default_model": cfg.Upstream.DefaultModel,
@@ -548,8 +552,18 @@ func (s *Server) settingsHandler(w http.ResponseWriter, r *http.Request) {
 		"allow_remote":  cfg.Management.AllowRemote,
 		"log_level":     cfg.Log.Level,
 		"tls_enable":    cfg.TLS.Enable,
-		"account":       cfg.Account,
+		"account":       acct,
 	})
+}
+
+// isASCII reports whether s contains only ASCII bytes.
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] > 127 {
+			return false
+		}
+	}
+	return true
 }
 
 // updateSettings applies model / force-model / proxy-policy edits from the
