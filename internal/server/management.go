@@ -542,6 +542,8 @@ func (s *Server) settingsHandler(w http.ResponseWriter, r *http.Request) {
 	cfg := s.cfg.Load()
 	acct := cfg.Account
 	if acct.Formula == "" || !isASCII(acct.Formula) {
+		// Unicode escapes keep this string ASCII-safe in source; it renders
+		// as: 未缓存输入 × 20% + 输出，缓存输入免费
 		acct.Formula = "未缓存输入 × 20% + 输出，缓存输入免费"
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
