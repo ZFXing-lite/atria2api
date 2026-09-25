@@ -457,6 +457,7 @@ var panelHTML = `<!DOCTYPE html>
     <div class="sf-row"><span class="sf-dot" id="sfDot" style="background:var(--green)"></span><span id="sfStatus">运行中</span></div>
     <div class="sf-row"><span>密钥</span><span class="sf-num" id="sfKeys">0/0</span></div>
     <div class="sf-row"><span>代理</span><span class="sf-num" id="sfProxies">直连</span></div>
+    <div class="sf-row" style="font-size:10px;opacity:0.5">v2.3</div>
   </div>
 </aside>
 <div class="sidebar-overlay" id="sidebarOverlay" onclick="toggleSidebar()"></div>
@@ -976,7 +977,7 @@ function updateOverview(s, usage, st) {
   var acct = (st && st.account) || {};
   var acEl = document.getElementById('ovAccountPanel');
   if (acEl) {
-    var quota = (acct.token_quota || 0) * (st.keys_total || 1);
+    var quota = (acct.token_quota || 0) * (s.keys_total || 1);
     var used = totIn + totOut;
     if (quota > 0) {
       acEl.style.display = '';
@@ -1079,7 +1080,7 @@ function refresh() {
     api('/v0/management/settings').catch(function(){ return null; })
   ]).then(function(all){
     updateOverview(all[0], all[3], all[5]);
-    renderKeys(all[0], all[1], all[3]);
+    renderKeys(all[0], all[1], all[3], all[5]);
     renderAPIKeys(all[2]);
     renderProxies(all[4]);
     renderUsage(all[3]);
@@ -1099,8 +1100,12 @@ function toggleAuto() {
   AUTO = !AUTO;
   document.getElementById('autoBtn').textContent = AUTO ? '自动' : '手动';
 }
-function renderKeys(s, keys, usage) {
+function renderKeys(s, keys, usage, st) {
   var total = s.keys_total || 0, healthy = s.keys_healthy || 0;
+  var perKeyQuota = 0;
+  if (st && st.account && st.account.token_quota && total > 0) {
+    perKeyQuota = Math.floor(st.account.token_quota / total);
+  }
   document.getElementById('keysPill').textContent = healthy + ' / ' + total;
   /* Chips */
   var cooled = 0, disabled = 0;
@@ -1129,7 +1134,7 @@ function renderKeys(s, keys, usage) {
       + '<td class="mono">' + esc(k.id) + '</td><td class="num">' + esc(k.weight) + '</td>'
       + '<td class="muted" title="' + attr(k.proxy || '') + '">' + proxyLbl + '</td>'
       + '<td>' + pill(k.state) + '</td><td class="muted">' + esc(k.reason || '—') + '</td><td>' + until + '</td>'
-      + '<td class="num">' + (k.rpm_limit ? (k.rpm_remaining + '/' + k.rpm_limit) : (total > 0 ? fmtTokens(total) : '—')) + '</td>'
+      + '<td class="num">' + (perKeyQuota > 0 ? fmtTokens(Math.max(perKeyQuota - total, 0)) : (k.rpm_limit ? (k.rpm_remaining + '/' + k.rpm_limit) : '—')) + '</td>'
       + '<td class="num">' + esc(k.inflight) + '</td>'
       + '<td class="num">' + esc(k.success_count) + '/<span class="' + (k.error_count ? 'err' : '') + '">' + esc(k.error_count) + '</span></td>'
       + '<td class="num">' + (u.requests || 0) + '</td>'
