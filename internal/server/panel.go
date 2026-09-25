@@ -21,7 +21,7 @@ var panelHTML = `<!DOCTYPE html>
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>atria2api</title>
+<title>atria2api v2.4</title>
 <style id="daisyui-css">` + daisyuiCSS + `</style>
 <style id="daisyui-themes">` + daisyuiThemesCSS + `</style>
 <style>
@@ -457,7 +457,7 @@ var panelHTML = `<!DOCTYPE html>
     <div class="sf-row"><span class="sf-dot" id="sfDot" style="background:var(--green)"></span><span id="sfStatus">运行中</span></div>
     <div class="sf-row"><span>密钥</span><span class="sf-num" id="sfKeys">0/0</span></div>
     <div class="sf-row"><span>代理</span><span class="sf-num" id="sfProxies">直连</span></div>
-    <div class="sf-row" style="font-size:10px;opacity:0.5">v2.3</div>
+    <div class="sf-row" style="font-size:10px;opacity:0.5">v2.4</div>
   </div>
 </aside>
 <div class="sidebar-overlay" id="sidebarOverlay" onclick="toggleSidebar()"></div>
@@ -1128,19 +1128,19 @@ function renderKeys(s, keys, usage, st) {
       : '<button class="btn sm" onclick="keyAct(\'' + attr(k.id) + '\',\'disable\')">禁用</button>';
     act += '<button class="btn sm danger" onclick="keyAct(\'' + attr(k.id) + '\',\'del\')">删除</button>';
     var u = byID[k.id] || {};
-    var total = (u.prompt_tokens || 0) + (u.completion_tokens || 0);
+    var keyUsed = (u.prompt_tokens || 0) + (u.completion_tokens || 0);
     var proxyLbl = k.proxy ? (k.proxy === 'none' ? '直连' : '已设') : '共享';
     return '<tr><td style="width:28px"><input type="checkbox" class="key-chk" data-id="' + attr(k.id) + '" onchange="keysSelUpdate()"></td>'
       + '<td class="mono">' + esc(k.id) + '</td><td class="num">' + esc(k.weight) + '</td>'
       + '<td class="muted" title="' + attr(k.proxy || '') + '">' + proxyLbl + '</td>'
       + '<td>' + pill(k.state) + '</td><td class="muted">' + esc(k.reason || '—') + '</td><td>' + until + '</td>'
-      + '<td class="num">' + (perKeyQuota > 0 ? fmtTokens(Math.max(perKeyQuota - total, 0)) : (k.rpm_limit ? (k.rpm_remaining + '/' + k.rpm_limit) : '—')) + '</td>'
+      + '<td class="num">' + (perKeyQuota > 0 ? fmtTokens(Math.max(perKeyQuota - keyUsed, 0)) + ' / ' + fmtTokens(perKeyQuota) : (k.rpm_limit ? (k.rpm_remaining + '/' + k.rpm_limit) : '—')) + '</td>'
       + '<td class="num">' + esc(k.inflight) + '</td>'
       + '<td class="num">' + esc(k.success_count) + '/<span class="' + (k.error_count ? 'err' : '') + '">' + esc(k.error_count) + '</span></td>'
       + '<td class="num">' + (u.requests || 0) + '</td>'
       + '<td class="num">' + fmtTokens(u.prompt_tokens) + '</td>'
       + '<td class="num">' + fmtTokens(u.completion_tokens) + '</td>'
-      + '<td class="num">' + fmtTokens(total) + '</td>'
+      + '<td class="num">' + fmtTokens(keyUsed) + '</td>'
       + '<td class="right"><div class="actions">' + act + '</div></td></tr>';
   }).join('');
   document.getElementById('keysBody').innerHTML = rows || emptyRow(15, '还没有上游账号，在下面添加');
