@@ -1103,8 +1103,8 @@ function toggleAuto() {
 function renderKeys(s, keys, usage, st) {
   var total = s.keys_total || 0, healthy = s.keys_healthy || 0;
   var perKeyQuota = 0;
-  if (st && st.account && st.account.token_quota && total > 0) {
-    perKeyQuota = Math.floor(st.account.token_quota / total);
+  if (st && st.account && st.account.token_quota) {
+    perKeyQuota = st.account.token_quota;
   }
   document.getElementById('keysPill').textContent = healthy + ' / ' + total;
   /* Chips */
