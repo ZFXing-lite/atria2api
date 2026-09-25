@@ -976,7 +976,8 @@ function updateOverview(s, usage, st) {
   var acct = (st && st.account) || {};
   var acEl = document.getElementById('ovAccountPanel');
   if (acEl) {
-    var quota = acct.token_quota || 0, used = acct.token_used || 0;
+    var quota = acct.token_quota || 0;
+    var used = (totIn + totOut) || (acct.token_used || 0);
     if (quota > 0) {
       acEl.style.display = '';
       var pct = used / quota * 100;
