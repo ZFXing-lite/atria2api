@@ -42,10 +42,21 @@ type Limits struct {
 	RPMLimit     int
 	RPMRemaining int
 	RetryAfter   time.Duration
+	TPMLimit     int // x-tpm-limit: token-per-minute ceiling
+	TPMRemaining int // x-tpm-remaining: tokens left this minute
 }
 
 // ErrNoKeys means no usable key is available.
 var ErrNoKeys = errors.New("no usable upstream key")
+
+// NoKeysError carries the soonest recovery time so the caller can wait instead
+// of immediately failing or sending traffic to a cooled-down key.
+type NoKeysError struct {
+	NextAt time.Time // zero when no key exists at all
+}
+
+func (e *NoKeysError) Error() string { return "no usable upstream key" }
+func (e *NoKeysError) Unwrap() error { return ErrNoKeys }
 
 // Settings tunes pool behaviour; hot-reloadable.
 type Settings struct {
@@ -58,6 +69,10 @@ type Settings struct {
 	MaxRetries    int           `yaml:"max-retries" json:"max_retries"`
 	RetryOn       []int         `yaml:"retry-on" json:"retry_on"`
 	Backoff       time.Duration `yaml:"backoff" json:"backoff"`
+	// SelectionPolicy controls how Pick chooses among eligible keys.
+	// "weighted" (default) does weighted random with LRU tie-break;
+	// "round-robin" picks the least-recently-used key deterministically.
+	SelectionPolicy string `yaml:"selection-policy" json:"selection_policy"`
 }
 
 // UpstreamKey is the configured view of a key.
@@ -93,8 +108,14 @@ type Entry struct {
 	usedSeq  uint64
 	lastUsed time.Time
 
-	successCount int64
-	errorCount   int64
+	successCount  int64
+	errorCount    int64
+	cooldownCount int // 429 escalation counter for cooldown ladder
+
+	// TPM (token-per-minute) observations from x-tpm-* headers.
+	tpmLimit     int       `json:"-"`
+	tpmRemaining int       `json:"-"`
+	tpmResetAt   time.Time `json:"-"`
 }
 
 // Pool manages all upstream keys.
@@ -239,7 +260,9 @@ func (p *Pool) Pick(tried map[string]bool) (Lease, error) {
 	}
 
 	if len(eligible) == 0 {
-		// Fallback: the entry that recovers soonest (never disabled ones).
+		// Fallback: find the entry that recovers soonest (never disabled ones)
+		// and return a NoKeysError with its recovery time so the caller can wait
+		// rather than sending traffic to a key that is still cooling down.
 		var best *Entry
 		for _, id := range p.order {
 			e := p.byID[id]
@@ -256,9 +279,22 @@ func (p *Pool) Pick(tried map[string]bool) (Lease, error) {
 			}
 		}
 		if best == nil {
-			return Lease{}, ErrNoKeys
+			return Lease{}, &NoKeysError{}
 		}
-		return p.lockLease(best), nil
+		return Lease{}, &NoKeysError{NextAt: best.resetAt()}
+	}
+
+	// Selection policy: "round-robin" picks the least-recently-used eligible
+	// key deterministically (pure RR, ignores weight beyond tie-break);
+	// anything else does weighted random with LRU tie-break (default).
+	if s.SelectionPolicy == "round-robin" {
+		var chosen *Entry
+		for _, e := range eligible {
+			if chosen == nil || e.usedSeq < chosen.usedSeq {
+				chosen = e
+			}
+		}
+		return p.lockLease(chosen), nil
 	}
 
 	// Weighted top-5 selection, with a Fisher-Yates shuffle first so equal
@@ -303,7 +339,9 @@ func (p *Pool) lockLease(e *Entry) Lease {
 }
 
 // effWeight is the pick weight: config weight damped when the key is burning
-// through its RPM budget, so near-limit keys are naturally deprioritized.
+// through its RPM budget, when it has many in-flight requests (least-connections),
+// and when its recent success rate is poor — so near-limit / busy / sick keys are
+// naturally deprioritized without ever being hard-excluded.
 func (e *Entry) effWeight(s Settings, now time.Time) int {
 	w := e.Weight
 	if e.Weight <= 0 {
@@ -314,6 +352,33 @@ func (e *Entry) effWeight(s Settings, now time.Time) int {
 		ratio := float64(e.rpmRemaining+1) / float64(e.rpmLimit)
 		if ratio < 1 {
 			if scaled := int(float64(w) * ratio); scaled >= 1 {
+				w = scaled
+			}
+		}
+	}
+	// least-connections: deprioritize keys with many in-flight requests.
+	if n := e.inflight.Load(); n > 0 {
+		if scaled := int(float64(w) / float64(1+n)); scaled >= 1 {
+			w = scaled
+		}
+	}
+	// success-rate damping: keys with poor recent success rate get deprioritized.
+	total := e.successCount + e.errorCount
+	if total >= 10 {
+		sr := float64(e.successCount) / float64(total)
+		if sr < 0.5 {
+			if scaled := int(float64(w) * sr * 2); scaled >= 1 {
+				w = scaled
+			}
+		}
+	}
+	// TPM damping: when the upstream reports a token-per-minute budget and the
+	// key is burning through it, deprioritize so the key that still has budget
+	// gets picked first.
+	if e.tpmLimit > 0 && e.tpmResetAt.After(now) && e.tpmRemaining < e.tpmLimit {
+		tpmRatio := float64(e.tpmRemaining+1) / float64(e.tpmLimit)
+		if tpmRatio < 1 {
+			if scaled := int(float64(w) * tpmRatio); scaled >= 1 {
 				w = scaled
 			}
 		}
@@ -380,10 +445,19 @@ func (p *Pool) NoteResult(l Lease, o Outcome) {
 		e.errorCount++
 		d := s.Cooldown429
 		if o.Limits.RetryAfter > 0 {
-			if o.Limits.RetryAfter > 10*time.Minute {
-				o.Limits.RetryAfter = 10 * time.Minute
+			if o.Limits.RetryAfter > 24*time.Hour {
+				o.Limits.RetryAfter = 24 * time.Hour
 			}
 			d = o.Limits.RetryAfter
+		} else {
+			// Escalating cooldown ladder: [2m, 10m, 1h, 1d] then capped at 1d.
+			ladder := []time.Duration{2 * time.Minute, 10 * time.Minute, time.Hour, 24 * time.Hour}
+			idx := e.cooldownCount
+			if idx >= len(ladder) {
+				idx = len(ladder) - 1
+			}
+			d = ladder[idx]
+			e.cooldownCount++
 		}
 		e.cool(now, CoolRate, d, "upstream 429 rate limit")
 	case o.StatusCode >= 500:
@@ -413,6 +487,7 @@ func (p *Pool) NoteResult(l Lease, o Outcome) {
 		e.until = time.Time{}
 		e.coolKind = CoolNone
 		e.reason = ""
+		e.cooldownCount = 0
 	}
 }
 
@@ -441,6 +516,13 @@ func (e *Entry) applyLimits(l Limits, now time.Time) {
 		e.rpmRemaining = l.RPMRemaining
 		e.rpmResetAt = now.Add(time.Minute)
 	}
+	if l.TPMLimit > 0 {
+		e.tpmLimit = l.TPMLimit
+	}
+	if l.TPMRemaining > 0 || l.TPMLimit > 0 {
+		e.tpmRemaining = l.TPMRemaining
+		e.tpmResetAt = now.Add(time.Minute)
+	}
 }
 
 // ParseLimitHeaders extracts the Atria rate-limit policy from a response.
@@ -459,6 +541,16 @@ func ParseLimitHeaders(get func(string) string) Limits {
 	if v := get("X-Rpm-Remaining"); v != "" {
 		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
 			l.RPMRemaining = n
+		}
+	}
+	if v := get("X-Tpm-Limit"); v != "" {
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+			l.TPMLimit = n
+		}
+	}
+	if v := get("X-Tpm-Remaining"); v != "" {
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+			l.TPMRemaining = n
 		}
 	}
 	return l
@@ -772,6 +864,8 @@ type EntryStatus struct {
 	Until        time.Time `json:"until,omitempty"`
 	RPMLimit     int       `json:"rpm_limit,omitempty"`
 	RPMRemaining int       `json:"rpm_remaining,omitempty"`
+	TPMLimit     int       `json:"tpm_limit,omitempty"`
+	TPMRemaining int       `json:"tpm_remaining,omitempty"`
 	Inflight     int64     `json:"inflight"`
 	SuccessCount int64     `json:"success_count"`
 	ErrorCount   int64     `json:"error_count"`
@@ -803,6 +897,7 @@ func (p *Pool) Status() []EntryStatus {
 			ID: e.ID, Weight: e.Weight, Proxy: e.Proxy,
 			State: st, CoolKind: string(e.coolKind), Reason: e.reason,
 			Until: e.resetAt(), RPMLimit: e.rpmLimit, RPMRemaining: e.rpmRemaining,
+			TPMLimit: e.tpmLimit, TPMRemaining: e.tpmRemaining,
 			Inflight: e.inflight.Load(), SuccessCount: e.successCount, ErrorCount: e.errorCount,
 		})
 	}
@@ -827,6 +922,52 @@ func (p *Pool) Summary() (total, healthy int) {
 	return total, healthy
 }
 
+// ClearCooldowns resets all cooldown/breaker state for non-disabled keys, but
+// only when no key is currently healthy — so a probe success after a total
+// outage recovers the gateway immediately instead of waiting for each key's
+// cooldown to expire. When any key is still serving, individual cooldowns are
+// left alone so a key that legitimately hit 429 seconds ago stays cooled.
+// Called by the background upstream health goroutine on a successful probe.
+func (p *Pool) ClearCooldowns() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	now := time.Now()
+	anyHealthy := false
+	for _, id := range p.order {
+		e := p.byID[id]
+		if e == nil || e.disabled || e.manualDisabled {
+			continue
+		}
+		if e.healthy(now) && !e.rpmExhausted(p.Settings(), now) {
+			anyHealthy = true
+			break
+		}
+	}
+	if anyHealthy {
+		return 0
+	}
+	n := 0
+	for _, id := range p.order {
+		e := p.byID[id]
+		if e == nil || e.disabled || e.manualDisabled {
+			continue
+		}
+		e.until = time.Time{}
+		e.coolKind = CoolNone
+		e.reason = ""
+		e.breakerUntil = time.Time{}
+		e.breakerRetry = 0
+		e.degradeUntil = time.Time{}
+		e.failCount = 0
+		e.cooldownCount = 0
+		n++
+	}
+	if n > 0 {
+		slog.Info("upstream probe succeeded; cleared all cooldowns", "keys", n)
+	}
+	return n
+}
+
 // HealthCheckAll cools every non-disabled key for d when the upstream is
 // unreachable, so the pool stops sending traffic until the next probe succeeds.
 // Called by the background upstream health goroutine in main.
@@ -848,11 +989,4 @@ func (p *Pool) HealthCheckAll(d time.Duration, reason string) int {
 			"keys", n, "until", now.Add(d).Format(time.RFC3339), "reason", reason)
 	}
 	return n
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }

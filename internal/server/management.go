@@ -121,10 +121,13 @@ func (s *Server) management(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.pool.RemoveKey(id) // id is gone from config; pool may not have it
+		s.relayer.InvalidateKey(id)
 		slog.Info("upstream key removed", "id", id)
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	case strings.HasPrefix(p, "/keys/") && strings.HasSuffix(p, "/disable") && r.Method == http.MethodPost:
-		if s.pool.Disable(idFromPath(p)) {
+		id := idFromPath(p)
+		if s.pool.Disable(id) {
+			s.relayer.InvalidateKey(id)
 			writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 		} else {
 			writeJSON(w, http.StatusNotFound, errBody("unknown key id", "unknown_key"))
@@ -388,6 +391,7 @@ func (s *Server) batchUpstreamKeys(w http.ResponseWriter, r *http.Request) {
 		for _, id := range req.IDs {
 			if s.mutateConfig(func(c *config.Config) bool { return c.RemoveUpstreamKey(id) }) {
 				s.pool.RemoveKey(id)
+				s.relayer.InvalidateKey(id)
 				removed++
 			}
 		}
@@ -397,6 +401,7 @@ func (s *Server) batchUpstreamKeys(w http.ResponseWriter, r *http.Request) {
 		affected := 0
 		for _, id := range req.IDs {
 			if s.pool.Disable(id) {
+				s.relayer.InvalidateKey(id)
 				affected++
 			}
 		}

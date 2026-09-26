@@ -15,6 +15,7 @@ package relay
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -23,6 +24,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -89,6 +91,7 @@ type Relayer struct {
 	cfg     atomic.Pointer[Config]
 	onUsage UsageHook
 	log     *slog.Logger
+	rtCache sync.Map // cacheKey -> http.RoundTripper (per key+timeout reuse)
 }
 
 func New(pool *keypool.Pool, proxies *proxypool.Pool, cfg Config, onUsage UsageHook) *Relayer {
@@ -99,6 +102,19 @@ func New(pool *keypool.Pool, proxies *proxypool.Pool, cfg Config, onUsage UsageH
 }
 
 func (r *Relayer) Update(cfg Config) { r.cfg.Store(&cfg) }
+
+// InvalidateKey drops cached transports for the given key ID so subsequent
+// requests build fresh connections. Called when a key is disabled or removed
+// so stale keep-alive connections to a dead/revoked upstream are not reused.
+func (r *Relayer) InvalidateKey(keyID string) {
+	prefix := keyID + "|"
+	r.rtCache.Range(func(k, _ any) bool {
+		if strings.HasPrefix(k.(string), prefix) {
+			r.rtCache.Delete(k)
+		}
+		return true
+	})
+}
 
 // maxBody protects the gateway; the API itself documents no body-size cap.
 const defaultMaxBody = 64 << 20 // 64 MiB
@@ -161,6 +177,22 @@ func (r *Relayer) Handle(w http.ResponseWriter, req *http.Request, kind Kind) {
 
 		lease, perr := r.pool.Pick(tried)
 		if perr != nil {
+			// All keys are cooling down. Wait for the soonest recovery instead of
+			// immediately failing — but only when we still have retry budget and
+			// the client hasn't disconnected.
+			var nk *keypool.NoKeysError
+			if errors.As(perr, &nk) && !nk.NextAt.IsZero() && attempt+1 < maxAttempts {
+				wait := time.Until(nk.NextAt)
+				if wait > 0 && wait < 30*time.Second {
+					r.log.Debug("all keys cooling, waiting for recovery", "wait", wait, "next_at", nk.NextAt)
+					select {
+					case <-req.Context().Done():
+						return
+					case <-time.After(wait):
+					}
+					continue // retry Pick without consuming an attempt
+				}
+			}
 			poolErr = perr
 			break // no key left; report the last upstream error below
 		}
@@ -539,6 +571,14 @@ func findUsageInStream(tail []byte, kind Kind) usage {
 	return parseUsage(kind, tail)
 }
 func (r *Relayer) transportFor(lease keypool.Lease, cfg Config) http.RoundTripper {
+	// Cache the final RoundTripper per (keyID, proxyURL, connectTimeout) so
+	// TCP+TLS connections are reused across requests. A config change (e.g.
+	// ConnectTimeout) produces a new cache key, so stale entries are simply
+	// orphaned rather than serving wrong timeouts.
+	cacheKey := lease.Entry.ID + "|px=" + lease.ProxyURL + "|ct=" + strconv.FormatInt(int64(cfg.ConnectTimeout), 10)
+	if v, ok := r.rtCache.Load(cacheKey); ok {
+		return v.(http.RoundTripper)
+	}
 	var rt http.RoundTripper
 	if ov := strings.TrimSpace(lease.ProxyURL); ov != "" {
 		rt = proxypool.TransportForURL(ov)
@@ -550,7 +590,8 @@ func (r *Relayer) transportFor(lease keypool.Lease, cfg Config) http.RoundTrippe
 	if cfg.ConnectTimeout > 0 {
 		rt = withConnectTimeout(rt, cfg.ConnectTimeout)
 	}
-	return rt
+	actual, _ := r.rtCache.LoadOrStore(cacheKey, rt)
+	return actual.(http.RoundTripper)
 }
 
 // --- header plumbing ------------------------------------------------------

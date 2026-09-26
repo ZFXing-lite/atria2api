@@ -300,6 +300,13 @@ func upstreamHealth(ctx context.Context, pool *keypool.Pool, cfg *config.Config)
 				if n > 0 {
 					slog.Warn("upstream health probe got 5xx", "url", probeURL, "status", resp.StatusCode, "keys_cooled", n)
 				}
+			} else {
+				// Upstream responded healthy. If every key was in cooldown (total
+				// outage), clear them so the gateway resumes immediately instead
+				// of waiting for each cooldown to expire individually.
+				if n := pool.ClearCooldowns(); n > 0 {
+					slog.Info("upstream probe recovered; cleared cooldowns", "url", probeURL, "keys", n)
+				}
 			}
 		}
 	}

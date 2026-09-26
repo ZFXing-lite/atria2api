@@ -48,8 +48,11 @@ type entry struct {
 	lastUsed   time.Time
 }
 
+// available reports whether the entry may be picked. A proxy is available when
+// its fail-cooldown has expired; the healthy flag is NOT a gate — a single
+// failure must not permanently kill a proxy that could recover on the next dial.
 func (e *entry) available(now time.Time) bool {
-	return e.healthy && (e.failUntil.IsZero() || !now.Before(e.failUntil))
+	return e.failUntil.IsZero() || !now.Before(e.failUntil)
 }
 
 // New builds a pool from configured entries. Bad URLs are logged and skipped
@@ -271,19 +274,20 @@ func dialerFor(rawURL string) (proxy.Dialer, error) {
 
 // Transport builds an *http.Transport that dials through a pool proxy chosen
 // at dial time. When the pool is empty it returns a direct transport. The
-// transport is cached per pool so TCP+TLS connections are reused across
+// transport is cached per keyHint so TCP+TLS connections are reused across
 // requests instead of being re-established on every call.
 //
-// A fresh clone is returned on every call. The cached template keeps idle
-// connections, but its DialContext must not be mutated in place: relay wraps
-// the result with withConnectTimeout, which would otherwise replace the
-// SOCKS5 dialer with a direct one and silently drop the proxy pool.
+// The cached transport's DialContext is set once and never mutated; relay wraps
+// the result with withConnectTimeout, which Clones the transport (so the
+// cached original is untouched) and caches that clone in its own rtCache.
 func (p *Pool) Transport(keyHint string, onProxy func(string)) *http.Transport {
 	if p == nil || p.Empty() {
 		return baseTransport()
 	}
-	v, _ := p.transportCache.LoadOrStore("__pool__", baseTransport())
-	t := v.(*http.Transport).Clone()
+	if v, ok := p.transportCache.Load(keyHint); ok {
+		return v.(*http.Transport)
+	}
+	t := baseTransport()
 	t.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 		proxyURL := p.Pick(keyHint)
 		if proxyURL == "" {
@@ -318,7 +322,8 @@ func (p *Pool) Transport(keyHint string, onProxy func(string)) *http.Transport {
 		}
 		return c, err
 	}
-	return t
+	actual, _ := p.transportCache.LoadOrStore(keyHint, t)
+	return actual.(*http.Transport)
 }
 
 func baseTransport() *http.Transport {

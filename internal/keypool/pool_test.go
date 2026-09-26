@@ -1,6 +1,7 @@
 package keypool
 
 import (
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -60,7 +61,7 @@ func TestPickRespectsTriedAndCooled(t *testing.T) {
 	// Exhaust: one healthy key left, then none.
 	tried[second.Entry.ID] = true
 	third, err := p.Pick(tried)
-	if err != ErrNoKeys {
+	if !errors.Is(err, ErrNoKeys) {
 		t.Fatalf("expected ErrNoKeys, got %v (entry %v)", err, third.Entry)
 	}
 }
